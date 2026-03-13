@@ -23,4 +23,4 @@ Litebase is built primarily in Go within a monorepo structure:
 
 ## Documentation
 
-For a deeper dive into the architecture and capabilities, see our locally hosted [docs](docs/index.md):
+For a deeper dive into the architecture and capabilities, see our locally hosted [docs](docs/index.md)
