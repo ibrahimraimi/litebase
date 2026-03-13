@@ -1,0 +1,57 @@
+bin/
+obj/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Litebase Binaries
+apps/data-plane/data-plane
+packages/cli/litebase
+packages/cli/cli
+litebase
+cli
+
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# Databases
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Backups and snapshots
+*.snapshot
+*.backup
+backups/
+snapshots/
+
+# Environment files
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+
+# Node / Frontend 
+node_modules/
+.npm/
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Temporary files created by CLI or server
+tmp/
+temp/
+coverage/
+*.log
