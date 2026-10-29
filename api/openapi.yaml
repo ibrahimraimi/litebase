@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Litebase Control Plane & SQLite HTTP API
-  version: 0.1.0
+  version: 0.0.1-beta
   description: Developer-first control plane for SQLite with migrations, snapshots, and branching.
   license:
     name: Apache 2.0
