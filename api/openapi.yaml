@@ -230,6 +230,55 @@ paths:
       responses:
         "200":
           description: Database restored
+  /v1/databases/{db}/download:
+    get:
+      summary: Download a consistent copy of the SQLite database file
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: db
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: SQLite 3 database binary stream
+          content:
+            application/vnd.sqlite3:
+              schema:
+                type: string
+                format: binary
+  /v1/databases/{db}/upload:
+    put:
+      summary: Overwrite the SQLite database file with an uploaded SQLite 3 file (requires ?force=true)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: db
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: force
+          in: query
+          required: true
+          schema:
+            type: boolean
+      requestBody:
+        required: true
+        content:
+          application/vnd.sqlite3:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: Database overwritten and verified
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DatabaseRecord"
   /v1/databases/{db}/branches:
     post:
       summary: Create an isolated copy-based branch database

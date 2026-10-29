@@ -26,10 +26,12 @@ type maintenanceJob struct {
 }
 
 type WriterStats struct {
-	TotalJobs        uint64
-	TotalBatches     uint64
-	TotalQueueFull   uint64
-	CurrentQueueSize int
+	TotalJobs             uint64
+	TotalBatches          uint64
+	TotalQueueFull        uint64
+	CurrentQueueSize      int
+	LastBatchSize         int
+	TotalCommitDurationNS uint64
 }
 
 type Writer struct {
@@ -42,12 +44,14 @@ type Writer struct {
 	maxRows      int
 	commitHook   func() error
 
-	isClosed       atomic.Bool
-	acceptMu       sync.RWMutex
-	workerDone     chan struct{}
-	totalJobs      atomic.Uint64
-	totalBatches   atomic.Uint64
-	totalQueueFull atomic.Uint64
+	isClosed              atomic.Bool
+	acceptMu              sync.RWMutex
+	workerDone            chan struct{}
+	totalJobs             atomic.Uint64
+	totalBatches          atomic.Uint64
+	totalQueueFull        atomic.Uint64
+	lastBatchSize         atomic.Int64
+	totalCommitDurationNS atomic.Uint64
 }
 
 func NewWriter(conn *sql.Conn, secState *connectionSecurityState, opts Options) *Writer {
@@ -126,10 +130,12 @@ func (w *Writer) RunMaintenance(ctx context.Context, task func(context.Context, 
 
 func (w *Writer) Stats() WriterStats {
 	return WriterStats{
-		TotalJobs:        w.totalJobs.Load(),
-		TotalBatches:     w.totalBatches.Load(),
-		TotalQueueFull:   w.totalQueueFull.Load(),
-		CurrentQueueSize: len(w.jobs),
+		TotalJobs:             w.totalJobs.Load(),
+		TotalBatches:          w.totalBatches.Load(),
+		TotalQueueFull:        w.totalQueueFull.Load(),
+		CurrentQueueSize:      len(w.jobs),
+		LastBatchSize:         int(w.lastBatchSize.Load()),
+		TotalCommitDurationNS: w.totalCommitDurationNS.Load(),
 	}
 }
 
@@ -239,8 +245,13 @@ func (w *Writer) collectBatch(firstJob *writeJob) []*writeJob {
 }
 
 func (w *Writer) commitBatch(batch []*writeJob) {
+	startedAt := time.Now()
 	w.totalBatches.Add(1)
 	w.totalJobs.Add(uint64(len(batch)))
+	w.lastBatchSize.Store(int64(len(batch)))
+	defer func() {
+		w.totalCommitDurationNS.Add(uint64(time.Since(startedAt).Nanoseconds()))
+	}()
 
 	bgCtx := context.Background()
 	if _, err := w.conn.ExecContext(bgCtx, "BEGIN IMMEDIATE"); err != nil {

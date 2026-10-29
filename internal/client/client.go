@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -317,6 +319,94 @@ func (c *Client) CreateToken(
 		responseTarget: &created,
 	})
 	return created, err
+}
+
+func (c *Client) DownloadDatabase(ctx context.Context, dbName string, destinationPath string) (int64, error) {
+	path := fmt.Sprintf("/v1/databases/%s/download", url.PathEscape(dbName))
+	req, err := c.newRequest(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("request GET %s failed: %w", path, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		return 0, decodeAPIError(resp)
+	}
+	return writeStreamAtomically(destinationPath, resp.Body)
+}
+
+func (c *Client) UploadDatabase(
+	ctx context.Context,
+	dbName string,
+	sourcePath string,
+) (control.DatabaseRecord, error) {
+	srcFile, err := os.Open(sourcePath)
+	if err != nil {
+		return control.DatabaseRecord{}, fmt.Errorf("open source database file %q: %w", sourcePath, err)
+	}
+	defer srcFile.Close()
+
+	path := fmt.Sprintf("/v1/databases/%s/upload?force=true", url.PathEscape(dbName))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.baseURL+path, srcFile)
+	if err != nil {
+		return control.DatabaseRecord{}, err
+	}
+	req.Header.Set("Content-Type", "application/vnd.sqlite3")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return control.DatabaseRecord{}, fmt.Errorf("request PUT %s failed: %w", path, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		return control.DatabaseRecord{}, decodeAPIError(resp)
+	}
+	var updated control.DatabaseRecord
+	if err := json.NewDecoder(resp.Body).Decode(&updated); err != nil {
+		return control.DatabaseRecord{}, fmt.Errorf("decode upload response: %w", err)
+	}
+	return updated, nil
+}
+
+func writeStreamAtomically(destinationPath string, reader io.Reader) (int64, error) {
+	if err := os.MkdirAll(filepath.Dir(destinationPath), 0o750); err != nil {
+		return 0, fmt.Errorf("create destination directory: %w", err)
+	}
+	stagingPath := destinationPath + ".pull-staging"
+	outFile, err := os.OpenFile(stagingPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return 0, err
+	}
+	written, copyErr := io.Copy(outFile, reader)
+	syncErr := outFile.Sync()
+	closeErr := outFile.Close()
+	if copyErr != nil || syncErr != nil || closeErr != nil {
+		_ = os.Remove(stagingPath)
+		return 0, fmt.Errorf("write downloaded database: %w", firstNonNilError(copyErr, syncErr, closeErr))
+	}
+	_ = os.Remove(destinationPath + "-wal")
+	_ = os.Remove(destinationPath + "-shm")
+	if err := os.Rename(stagingPath, destinationPath); err != nil {
+		_ = os.Remove(stagingPath)
+		return 0, err
+	}
+	return written, nil
+}
+
+func firstNonNilError(errs ...error) error {
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *Client) doJSON(ctx context.Context, opts requestOptions) error {

@@ -198,7 +198,7 @@ Unauthenticated operational endpoints are exposed at the root path:
 |---|---|---|
 | `GET /healthz` | `200 OK` (`{"status":"ok"}`) | Liveness probe confirming the HTTP process is up. |
 | `GET /readyz` | `200 OK` (`{"status":"ready"}`) | Readiness probe verifying `control.db` can execute queries (`503` on failure). |
-| `GET /metrics` | `200 OK` (`text/plain; version=0.0.4`) | Prometheus metrics (`litebase_queries_total`, `litebase_batches_total`, `litebase_http_requests_total`). |
+| `GET /metrics` | `200 OK` (`text/plain; version=0.0.4`) | Prometheus metrics (`litebase_queries_total`, `litebase_batches_total`, `litebase_http_requests_total`, `litebase_db_size_bytes`, `litebase_wal_size_bytes`, `litebase_wal_checkpoint_alert`, `litebase_queue_depth`, `litebase_batch_size`, `litebase_commit_latency_seconds_total`). |
 
 ### Graceful Shutdown
 

@@ -50,7 +50,7 @@ func applySecurityHeaders(next http.Handler) http.Handler {
 
 func isAllowedHTTPMethod(method string) bool {
 	switch method {
-	case http.MethodGet, http.MethodPost, http.MethodDelete, http.MethodHead:
+	case http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodHead:
 		return true
 	default:
 		return false

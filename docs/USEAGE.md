@@ -156,6 +156,22 @@ During a restore, Litebase:
 3. Removes stale `-wal` and `-shm` files and atomically replaces the database file with the snapshot copy.
 4. Reopens the database and runs `PRAGMA integrity_check`.
 
+### Whole-File Download & Upload (`pull` & `push --force`)
+
+When you need to pull a full copy of a remote database locally or seed a remote database from a local SQLite file:
+
+```bash
+# Download a consistent VACUUM INTO copy of the remote database to .litebase/local.sqlite
+litebase pull
+# Pulled remote database "main" to .litebase/local.sqlite (16384 bytes)
+
+# Overwrite the remote database with a local SQLite file (requires --force; takes an automatic pre-push snapshot)
+litebase push --force
+# Pushed .litebase/local.sqlite to remote database "main" (size=16384 bytes)
+```
+
+Pass `--file <path>` to either command to read from or write to a custom SQLite file path.
+
 ---
 
 ## 4. Database Branching (`branch`)
@@ -235,6 +251,8 @@ All `/v1` endpoints expect `Authorization: Bearer lbk_<token>` and JSON request 
 | `POST` | `/v1/databases/{db}/snapshots` | `write` | Create a consistent snapshot via `VACUUM INTO` |
 | `GET` | `/v1/databases/{db}/snapshots` | `read` | List snapshots for `{db}` |
 | `POST` | `/v1/databases/{db}/restore` | `write` | Restore `{db}` from a `snapshot_id` |
+| `GET` | `/v1/databases/{db}/download` | `read` | Download a consistent `VACUUM INTO` copy of `{db}` (`litebase pull`) |
+| `PUT` | `/v1/databases/{db}/upload?force=true` | `write` | Overwrite `{db}` with an uploaded SQLite 3 file after `integrity_check` (`litebase push --force`) |
 | `POST` | `/v1/databases/{db}/branches` | `write` | Create an isolated branch copy from `{db}` |
 | `GET` | `/v1/databases/{db}/branches` | `read` | List branches created from `{db}` |
 | `DELETE` | `/v1/databases/{db}/branches/{branch}` | `write` | Delete a branch database |

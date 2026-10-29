@@ -213,6 +213,9 @@ func TestRateLimitingAndMetrics(t *testing.T) {
 		RateLimitPerSec: 1,
 		RateLimitBurst:  2,
 	}, engine.Options{})
+	if _, err := env.mgr.CreateDatabase(context.Background(), "main", engine.DurabilityNormal); err != nil {
+		t.Fatalf("CreateDatabase: %v", err)
+	}
 
 	for i := 0; i < 2; i++ {
 		resp := doJSONRequest(t, env.server.URL, http.MethodGet, "/v1/databases", env.adminToken, nil)
@@ -232,8 +235,20 @@ func TestRateLimitingAndMetrics(t *testing.T) {
 	}
 	bodyBytes, _ := io.ReadAll(metricsResp.Body)
 	_ = metricsResp.Body.Close()
-	if !strings.Contains(string(bodyBytes), "litebase_http_requests_total") {
-		t.Fatalf("expected prometheus counter in /metrics output, got: %s", string(bodyBytes))
+	metricsText := string(bodyBytes)
+	requiredMetrics := []string{
+		"litebase_http_requests_total",
+		`litebase_db_size_bytes{db="main"}`,
+		`litebase_wal_size_bytes{db="main"}`,
+		`litebase_wal_checkpoint_alert{db="main"}`,
+		`litebase_queue_depth{db="main"}`,
+		`litebase_batch_size{db="main"}`,
+		`litebase_commit_latency_seconds_total{db="main"}`,
+	}
+	for _, metricName := range requiredMetrics {
+		if !strings.Contains(metricsText, metricName) {
+			t.Fatalf("expected metric %q in /metrics output, got:\n%s", metricName, metricsText)
+		}
 	}
 }
 

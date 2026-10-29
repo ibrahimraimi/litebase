@@ -116,4 +116,3 @@ func ResolveRemoteTarget(flags RuntimeFlags) (*client.Client, string, ProjectCon
 	}
 	return client.New(remoteURL, token), dbName, cfg, nil
 }
-
