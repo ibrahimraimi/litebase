@@ -29,12 +29,24 @@ func (me *ManagedEntry) LastUsed() time.Time {
 	return time.Unix(0, me.lastUsedNS.Load())
 }
 
+const DefaultWALAlertThresholdBytes = 64 * 1024 * 1024
+
+type DatabaseMetrics struct {
+	Name                 string
+	DBSizeBytes          int64
+	WALSizeBytes         int64
+	WALThresholdExceeded bool
+	IsOpen               bool
+	Writer               engine.WriterStats
+}
+
 type Manager struct {
 	dataDir       string
 	store         *control.Store
 	sqlEngine     engine.Engine
 	defaultOpts   engine.Options
 	maxDBSizeByte int64
+	walAlertBytes int64
 
 	mu      sync.Mutex
 	openDBs map[string]*ManagedEntry
@@ -42,11 +54,12 @@ type Manager struct {
 }
 
 type Config struct {
-	DataDir        string
-	Store          *control.Store
-	Engine         engine.Engine
-	DefaultOptions engine.Options
-	MaxDBSizeBytes int64
+	DataDir                string
+	Store                  *control.Store
+	Engine                 engine.Engine
+	DefaultOptions         engine.Options
+	MaxDBSizeBytes         int64
+	WALAlertThresholdBytes int64
 }
 
 func NewManager(cfg Config) (*Manager, error) {
@@ -60,12 +73,17 @@ func NewManager(cfg Config) (*Manager, error) {
 	if sqlEng == nil {
 		sqlEng = engine.NewSQLiteEngine()
 	}
+	walAlert := cfg.WALAlertThresholdBytes
+	if walAlert <= 0 {
+		walAlert = DefaultWALAlertThresholdBytes
+	}
 	return &Manager{
 		dataDir:       cfg.DataDir,
 		store:         cfg.Store,
 		sqlEngine:     sqlEng,
 		defaultOpts:   cfg.DefaultOptions,
 		maxDBSizeByte: cfg.MaxDBSizeBytes,
+		walAlertBytes: walAlert,
 		openDBs:       make(map[string]*ManagedEntry),
 	}, nil
 }
@@ -319,14 +337,47 @@ func copyFileContents(srcPath string, dstPath string) error {
 	return dstFile.Close()
 }
 
-func measureSQLiteFileBytes(dbPath string) int64 {
-	var total int64
-	for _, suffix := range []string{"", "-wal"} {
-		if info, err := os.Stat(dbPath + suffix); err == nil {
-			total += info.Size()
-		}
+func (m *Manager) CollectDatabaseMetrics(ctx context.Context) ([]DatabaseMetrics, error) {
+	records, err := m.store.ListDatabases(ctx, control.DefaultProjectID)
+	if err != nil {
+		return nil, err
 	}
-	return total
+	m.mu.Lock()
+	openSnapshot := make(map[string]*engine.Database, len(m.openDBs))
+	for name, entry := range m.openDBs {
+		openSnapshot[name] = entry.DB
+	}
+	m.mu.Unlock()
+
+	metricsList := make([]DatabaseMetrics, 0, len(records))
+	for _, rec := range records {
+		dbBytes := measureSingleFileBytes(rec.Path)
+		walBytes := measureSingleFileBytes(rec.Path + "-wal")
+		dm := DatabaseMetrics{
+			Name:                 rec.Name,
+			DBSizeBytes:          dbBytes,
+			WALSizeBytes:         walBytes,
+			WALThresholdExceeded: walBytes > m.walAlertBytes,
+		}
+		if openDB, ok := openSnapshot[rec.Name]; ok {
+			dm.IsOpen = true
+			dm.Writer = openDB.Stats()
+		}
+		metricsList = append(metricsList, dm)
+	}
+	return metricsList, nil
+}
+
+func measureSingleFileBytes(filePath string) int64 {
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return 0
+	}
+	return info.Size()
+}
+
+func measureSQLiteFileBytes(dbPath string) int64 {
+	return measureSingleFileBytes(dbPath) + measureSingleFileBytes(dbPath+"-wal")
 }
 
 func removeSQLiteFiles(dbPath string) {

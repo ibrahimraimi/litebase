@@ -111,6 +111,8 @@ func (s *Server) buildHandler() http.Handler {
 	mux.HandleFunc("POST /v1/databases/{db}/snapshots", s.requireAuth(s.handleCreateSnapshot))
 	mux.HandleFunc("GET /v1/databases/{db}/snapshots", s.requireAuth(s.handleListSnapshots))
 	mux.HandleFunc("POST /v1/databases/{db}/restore", s.requireAuth(s.handleRestoreSnapshot))
+	mux.HandleFunc("GET /v1/databases/{db}/download", s.requireAuth(s.handleDownloadDatabase))
+	mux.HandleFunc("PUT /v1/databases/{db}/upload", s.requireAuth(s.handleUploadDatabase))
 
 	mux.HandleFunc("POST /v1/databases/{db}/branches", s.requireAuth(s.handleCreateBranch))
 	mux.HandleFunc("GET /v1/databases/{db}/branches", s.requireAuth(s.handleListBranches))

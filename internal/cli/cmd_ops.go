@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/litebase/litebase/internal/engine"
@@ -281,3 +283,63 @@ func newBranchMergeCommand(flags *RuntimeFlags) *cobra.Command {
 	}
 }
 
+func newPushCommand(flags *RuntimeFlags) *cobra.Command {
+	var force bool
+	var filePath string
+	cmd := &cobra.Command{
+		Use:   "push",
+		Short: "Upload and overwrite the remote SQLite database file (requires --force)",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if !force {
+				return errors.New("refusing to overwrite remote database without --force; use 'litebase deploy' for schema migrations or pass --force")
+			}
+			apiClient, dbName, _, err := ResolveRemoteTarget(*flags)
+			if err != nil {
+				return err
+			}
+			sourcePath := resolveLocalFilePath(flags.WorkDir, filePath)
+			rec, err := apiClient.UploadDatabase(cmd.Context(), dbName, sourcePath)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Pushed %s to remote database %q (size=%d bytes)\n",
+				sourcePath, rec.Name, rec.SizeBytes)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&force, "force", false, "Confirm overwriting the remote database file")
+	cmd.Flags().StringVar(&filePath, "file", "", "Path to local SQLite file (defaults to .litebase/local.sqlite)")
+	return cmd
+}
+
+func newPullCommand(flags *RuntimeFlags) *cobra.Command {
+	var filePath string
+	cmd := &cobra.Command{
+		Use:   "pull",
+		Short: "Download a consistent copy of the remote SQLite database to a local file",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			apiClient, dbName, _, err := ResolveRemoteTarget(*flags)
+			if err != nil {
+				return err
+			}
+			destPath := resolveLocalFilePath(flags.WorkDir, filePath)
+			writtenBytes, err := apiClient.DownloadDatabase(cmd.Context(), dbName, destPath)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Pulled remote database %q to %s (%d bytes)\n",
+				dbName, destPath, writtenBytes)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&filePath, "file", "", "Destination SQLite file path (defaults to .litebase/local.sqlite)")
+	return cmd
+}
+
+func resolveLocalFilePath(workDir string, overridePath string) string {
+	trimmed := strings.TrimSpace(overridePath)
+	if trimmed != "" {
+		return trimmed
+	}
+	return filepath.Join(workDir, DefaultLocalDBRelPath)
+}

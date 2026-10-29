@@ -109,10 +109,52 @@ func verifySnapshotsAndBranchesCLI(t *testing.T, projectDir string, adminToken s
 	if !strings.Contains(invOut, "1999") {
 		t.Fatalf("expected 1999 in merged invoices table on main, got: %s", invOut)
 	}
+
+	verifyPullAndPushCLI(t, projectDir, adminToken)
+}
+
+func verifyPullAndPushCLI(t *testing.T, projectDir string, adminToken string) {
+	t.Helper()
+	pullOut := runCLI(t, projectDir, adminToken, "pull")
+	if !strings.Contains(pullOut, "Pulled remote database") {
+		t.Fatalf("unexpected pull output: %s", pullOut)
+	}
+	localQueryOut := runCLI(t, projectDir, adminToken, "query", "SELECT email FROM users")
+	if !strings.Contains(localQueryOut, "ada@example.com") {
+		t.Fatalf("expected pulled local DB to contain ada@example.com, got: %s", localQueryOut)
+	}
+
+	runCLI(t, projectDir, adminToken, "query", "INSERT INTO users (email) VALUES ('local-push@example.com')")
+
+	if err := executeCLI(projectDir, adminToken, "push"); err == nil {
+		t.Fatal("expected 'litebase push' without --force to fail")
+	}
+
+	pushOut := runCLI(t, projectDir, adminToken, "push", "--force")
+	if !strings.Contains(pushOut, "Pushed") {
+		t.Fatalf("unexpected push --force output: %s", pushOut)
+	}
+	remoteAfterPush := runCLI(t, projectDir, adminToken, "query", "--remote", "SELECT email FROM users WHERE email = 'local-push@example.com'")
+	if !strings.Contains(remoteAfterPush, "local-push@example.com") {
+		t.Fatalf("expected remote DB to contain row from pushed local DB, got: %s", remoteAfterPush)
+	}
 }
 
 func runCLI(t *testing.T, workDir string, token string, args ...string) string {
 	t.Helper()
+	out, err := executeCLIWithOutput(workDir, token, args...)
+	if err != nil {
+		t.Fatalf("CLI %v failed: %v", args, err)
+	}
+	return out
+}
+
+func executeCLI(workDir string, token string, args ...string) error {
+	_, err := executeCLIWithOutput(workDir, token, args...)
+	return err
+}
+
+func executeCLIWithOutput(workDir string, token string, args ...string) (string, error) {
 	cmd := cli.NewRootCommand()
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
@@ -120,8 +162,7 @@ func runCLI(t *testing.T, workDir string, token string, args ...string) string {
 	fullArgs := append([]string{"--work-dir", workDir, "--token", token}, args...)
 	cmd.SetArgs(fullArgs)
 	if err := cmd.Execute(); err != nil {
-		t.Fatalf("CLI %v failed: %v (stderr: %s)", args, err, stderr.String())
+		return stdout.String(), err
 	}
-	return stdout.String()
+	return stdout.String(), nil
 }
-

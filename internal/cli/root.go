@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"github.com/litebase/litebase/internal/config"
 	"github.com/spf13/cobra"
 )
 
@@ -11,6 +12,7 @@ func NewRootCommand() *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:           "litebase",
 		Short:         "Developer-first control plane for SQLite",
+		Version:       config.Version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
@@ -31,7 +33,8 @@ func NewRootCommand() *cobra.Command {
 		newDatabaseCommand(flags),
 		newSnapshotCommand(flags),
 		newBranchCommand(flags),
+		newPushCommand(flags),
+		newPullCommand(flags),
 	)
 	return rootCmd
 }
-
