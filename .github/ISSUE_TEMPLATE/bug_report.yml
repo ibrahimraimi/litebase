@@ -1,0 +1,72 @@
+name: Bug Report
+description: Report a bug in the Litebase server, storage engine, or CLI
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug in Litebase. Please fill out the sections below so we can reproduce and fix the issue quickly.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which area of Litebase is affected?
+      options:
+        - Storage Engine / Writer Actor (internal/engine)
+        - HTTP REST API / Auth (internal/api, internal/auth)
+        - CLI Workflow (init / link / deploy / query / shell)
+        - Migrations (internal/migrate)
+        - Snapshots & Restore (internal/snapshot)
+        - Branching & Schema Diff/Merge (internal/branch)
+        - Docker / Packaging
+        - Documentation
+    validations:
+      required: true
+
+  - type: dropdown
+    id: durability
+    attributes:
+      label: Database Durability Mode
+      options:
+        - normal (default)
+        - full
+        - Not applicable
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear and concise description of the problem.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Minimal commands, SQL statements, or HTTP requests that reproduce the issue.
+      placeholder: |
+        1. Start server with `litebase serve --addr 127.0.0.1:8080 --data-dir ./litebase-data`
+        2. Run `litebase db create main`
+        3. Execute `...`
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen instead?
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment (OS, Arch, Go Version)
+      placeholder: "Linux amd64 (Ubuntu 24.04), Go 1.23.0"
+    validations:
+      required: true
+

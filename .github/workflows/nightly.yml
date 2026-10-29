@@ -1,0 +1,38 @@
+name: Nightly Crash, Fuzz & Benchmarks
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  crash-and-fuzz:
+    name: Crash Durability Loop, Fuzzing & Benchmarks
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "1"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run FuzzTypedValueRoundTrip (30s)
+        run: go test -fuzz=^FuzzTypedValueRoundTrip$ -fuzztime=30s ./internal/engine/...
+
+      - name: Run FuzzValidateName (30s)
+        run: go test -fuzz=^FuzzValidateName$ -fuzztime=30s ./internal/engine/...
+
+      - name: Run repeated SIGKILL crash durability loop
+        run: go test -count=50 -v -run=^TestCrashDurabilityKill9$ ./internal/engine/...
+
+      - name: Run engine benchmarks
+        run: make bench
+

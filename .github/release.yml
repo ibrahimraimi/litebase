@@ -1,0 +1,37 @@
+changelog:
+  exclude:
+    labels:
+      - ignore-for-release
+  categories:
+    - title: "Breaking Changes"
+      labels:
+        - breaking-change
+    - title: "Storage Engine & Durability"
+      labels:
+        - engine
+        - durability
+    - title: "CLI, Migrations & Branching"
+      labels:
+        - cli
+        - migrations
+        - branch
+        - snapshot
+    - title: "HTTP API & Security"
+      labels:
+        - api
+        - security
+        - auth
+    - title: "Bug Fixes"
+      labels:
+        - bug
+    - title: "Documentation"
+      labels:
+        - documentation
+    - title: "Maintenance & Dependencies"
+      labels:
+        - dependencies
+        - ci
+    - title: "Other Changes"
+      labels:
+        - "*"
+

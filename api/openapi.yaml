@@ -1,0 +1,446 @@
+openapi: 3.1.0
+info:
+  title: Litebase Control Plane & SQLite HTTP API
+  version: 0.1.0
+  description: Developer-first control plane for SQLite with migrations, snapshots, and branching.
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+servers:
+  - url: http://127.0.0.1:8080
+paths:
+  /healthz:
+    get:
+      summary: Process liveness check
+      responses:
+        "200":
+          description: Process is alive
+  /readyz:
+    get:
+      summary: Control plane readiness check
+      responses:
+        "200":
+          description: Control plane is reachable
+        "503":
+          description: Control plane unavailable
+  /metrics:
+    get:
+      summary: Prometheus metrics endpoint
+      responses:
+        "200":
+          description: Prometheus exposition format metrics
+  /v1/databases:
+    post:
+      summary: Create a new SQLite database
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateDatabaseRequest"
+      responses:
+        "201":
+          description: Database created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DatabaseRecord"
+        "409":
+          description: Database already exists
+    get:
+      summary: List databases
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: List of databases
+  /v1/databases/{db}:
+    get:
+      summary: Get database metadata
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: db
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Database metadata
+        "404":
+          description: Database not found
+    delete:
+      summary: Delete a database
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: db
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Database deleted
+  /v1/databases/{db}/query:
+    post:
+      summary: Execute a single SQL statement
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: db
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: format
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [typed, plain]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/QueryRequest"
+      responses:
+        "200":
+          description: Query execution result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueryResponse"
+  /v1/databases/{db}/batch:
+    post:
+      summary: Execute multiple SQL statements atomically
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: db
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchRequest"
+      responses:
+        "200":
+          description: Batch execution results
+  /v1/databases/{db}/migrations:
+    get:
+      summary: List applied migrations
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: db
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Applied migrations
+  /v1/databases/{db}/migrations/apply:
+    post:
+      summary: Apply pending migrations atomically
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: db
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApplyMigrationsRequest"
+      responses:
+        "200":
+          description: Migration deployment result
+  /v1/databases/{db}/schema:
+    get:
+      summary: Inspect database schema objects
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: db
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Schema objects
+  /v1/databases/{db}/snapshots:
+    post:
+      summary: Create a consistent snapshot via VACUUM INTO
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: db
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "201":
+          description: Snapshot created
+    get:
+      summary: List snapshots for a database
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: db
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of snapshots
+  /v1/databases/{db}/restore:
+    post:
+      summary: Restore database from a snapshot
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: db
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RestoreRequest"
+      responses:
+        "200":
+          description: Database restored
+  /v1/databases/{db}/branches:
+    post:
+      summary: Create an isolated copy-based branch database
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: db
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "201":
+          description: Branch created
+    get:
+      summary: List branches of a database
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: db
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of branches
+  /v1/databases/{db}/branches/{branch}:
+    delete:
+      summary: Delete a branch database
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: db
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: branch
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Branch deleted
+  /v1/databases/{db}/branches/{branch}/diff:
+    get:
+      summary: Compute schema diff SQL from parent database to branch
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: db
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: branch
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Schema diff statements
+  /v1/databases/{db}/branches/{branch}/merge:
+    post:
+      summary: Apply schema diff from branch onto parent database
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: db
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: branch
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Schema merged
+  /v1/tokens:
+    post:
+      summary: Issue a new scoped API token
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTokenRequest"
+      responses:
+        "201":
+          description: Token created
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    TypedValue:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [null, integer, float, text, blob]
+        value:
+          type: [string, "null"]
+    CreateDatabaseRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        durability:
+          type: string
+          enum: [normal, full]
+    DatabaseRecord:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        durability:
+          type: string
+        size_bytes:
+          type: integer
+        created_at:
+          type: string
+    QueryRequest:
+      type: object
+      required: [sql]
+      properties:
+        sql:
+          type: string
+        params:
+          type: array
+          items:
+            $ref: "#/components/schemas/TypedValue"
+        plain:
+          type: boolean
+    QueryResponse:
+      type: object
+      properties:
+        columns:
+          type: array
+          items:
+            type: string
+        rows:
+          type: array
+        rows_affected:
+          type: integer
+        last_insert_rowid:
+          type: [integer, "null"]
+        truncated:
+          type: boolean
+        duration_ms:
+          type: number
+    BatchRequest:
+      type: object
+      required: [statements]
+      properties:
+        statements:
+          type: array
+          items:
+            $ref: "#/components/schemas/QueryRequest"
+    ApplyMigrationsRequest:
+      type: object
+      required: [migrations]
+      properties:
+        migrations:
+          type: array
+        dry_run:
+          type: boolean
+    RestoreRequest:
+      type: object
+      required: [snapshot_id]
+      properties:
+        snapshot_id:
+          type: string
+    CreateTokenRequest:
+      type: object
+      required: [scopes]
+      properties:
+        database:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+            enum: [read, write, admin]
+        expires_in_seconds:
+          type: integer
+    ProblemDetail:
+      type: object
+      required: [type, title, status, code, detail]
+      properties:
+        type:
+          type: string
+        title:
+          type: string
+        status:
+          type: integer
+        code:
+          type: string
+        detail:
+          type: string
+

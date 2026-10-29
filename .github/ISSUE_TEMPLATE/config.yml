@@ -1,0 +1,9 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/litebase/litebase/tree/main/docs
+    about: Read the Installation, Setup, and Usage guides before opening an issue.
+  - name: Security Vulnerability Report
+    url: https://github.com/litebase/litebase/blob/main/.github/SECURITY.md
+    about: Please do not report security vulnerabilities in public issues. Follow SECURITY.md instead.
+

@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-vet:
+    name: Format, Vet & Vulnerability Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify gofmt formatting
+        run: |
+          UNFORMATTED=$(gofmt -s -l cmd/ internal/ test/)
+          if [ -n "$UNFORMATTED" ]; then
+            echo "The following files are not formatted with gofmt -s:"
+            echo "$UNFORMATTED"
+            exit 1
+          fi
+
+      - name: Run go vet
+        run: make vet
+
+      - name: Run govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  test-and-race:
+    name: Unit, Fuzz Corpus, Crash & Race Tests
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "1"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run test suite with race detector
+        run: make race
+
+      - name: Build binary
+        run: make build
+
+      - name: Verify CLI entrypoint
+        run: ./bin/litebase --help
+
+  docker-e2e:
+    name: Docker Build & 3-Curl Smoke Test
+    runs-on: ubuntu-latest
+    needs: [lint-and-vet, test-and-race]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t litebase:ci .
+
+      - name: Start container and run 3-curl quickstart check
+        env:
+          LITEBASE_BOOTSTRAP_TOKEN: "lbk_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        run: |
+          docker run -d --name litebase-ci \
+            -p 127.0.0.1:8080:8080 \
+            -e LITEBASE_BOOTSTRAP_TOKEN="$LITEBASE_BOOTSTRAP_TOKEN" \
+            litebase:ci \
+            serve --addr 0.0.0.0:8080 --data-dir /var/lib/litebase
+
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/readyz >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.5
+          done
+
+          curl -fsS http://127.0.0.1:8080/healthz
+          curl -fsS http://127.0.0.1:8080/readyz
+
+          curl -fsS -X POST http://127.0.0.1:8080/v1/databases \
+            -H "Authorization: Bearer $LITEBASE_BOOTSTRAP_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"name":"main","durability":"full"}'
+
+          curl -fsS -X POST http://127.0.0.1:8080/v1/databases/main/batch \
+            -H "Authorization: Bearer $LITEBASE_BOOTSTRAP_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"statements":[
+              {"sql":"CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)"},
+              {"sql":"INSERT INTO users (name) VALUES (?)","params":[{"type":"text","value":"Ada"}]}
+            ]}'
+
+          curl -fsS -X POST http://127.0.0.1:8080/v1/databases/main/query \
+            -H "Authorization: Bearer $LITEBASE_BOOTSTRAP_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"sql":"SELECT id, name FROM users"}'
+
+          docker stop litebase-ci
+          docker rm litebase-ci
+
