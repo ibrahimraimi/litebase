@@ -10,8 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/litebase/litebase/internal/control"
-	"github.com/litebase/litebase/internal/engine"
+	"github.com/ibrahimraimi/litebase/internal/control"
+	"github.com/ibrahimraimi/litebase/internal/engine"
 )
 
 type ManagedEntry struct {
@@ -29,7 +29,12 @@ func (me *ManagedEntry) LastUsed() time.Time {
 	return time.Unix(0, me.lastUsedNS.Load())
 }
 
-const DefaultWALAlertThresholdBytes = 64 * 1024 * 1024
+const (
+	DefaultWALAlertThresholdBytes = 64 * 1024 * 1024
+	defaultRestoreDrainTimeout    = 5 * time.Second
+)
+
+var ErrDatabaseRestoring = errors.New("database is busy restoring from snapshot")
 
 type DatabaseMetrics struct {
 	Name                 string
@@ -48,9 +53,11 @@ type Manager struct {
 	maxDBSizeByte int64
 	walAlertBytes int64
 
-	mu      sync.Mutex
-	openDBs map[string]*ManagedEntry
-	closed  bool
+	mu         sync.Mutex
+	openDBs    map[string]*ManagedEntry
+	restoring  map[string]struct{}
+	renameFile func(oldpath string, newpath string) error
+	closed     bool
 }
 
 type Config struct {
@@ -85,6 +92,8 @@ func NewManager(cfg Config) (*Manager, error) {
 		maxDBSizeByte: cfg.MaxDBSizeBytes,
 		walAlertBytes: walAlert,
 		openDBs:       make(map[string]*ManagedEntry),
+		restoring:     make(map[string]struct{}),
+		renameFile:    os.Rename,
 	}, nil
 }
 
@@ -150,6 +159,9 @@ func (m *Manager) Acquire(ctx context.Context, name string) (*ManagedEntry, erro
 	if m.closed {
 		return nil, engine.ErrDatabaseClosed
 	}
+	if _, isRestoring := m.restoring[name]; isRestoring {
+		return nil, ErrDatabaseRestoring
+	}
 	if existing, ok := m.openDBs[name]; ok {
 		existing.inFlight.Add(1)
 		existing.Touch()
@@ -161,9 +173,18 @@ func (m *Manager) Acquire(ctx context.Context, name string) (*ManagedEntry, erro
 	}
 	opts := m.defaultOpts
 	opts.Durability = record.Durability
+	if m.maxDBSizeByte > 0 && opts.MaxDBSizeBytes <= 0 {
+		opts.MaxDBSizeBytes = m.maxDBSizeByte
+	}
 	openedDB, err := engine.OpenDatabase(ctx, m.sqlEngine, record.Path, opts)
 	if err != nil {
 		return nil, err
+	}
+	if !openedDB.HadInternalMigrationsTable() {
+		if upgErr := m.upgradeLegacyMigrations(ctx, record.ID, openedDB); upgErr != nil {
+			_ = openedDB.Close(ctx)
+			return nil, upgErr
+		}
 	}
 	entry := &ManagedEntry{
 		Record: record,
@@ -173,6 +194,28 @@ func (m *Manager) Acquire(ctx context.Context, name string) (*ManagedEntry, erro
 	entry.Touch()
 	m.openDBs[name] = entry
 	return entry, nil
+}
+
+func (m *Manager) upgradeLegacyMigrations(ctx context.Context, databaseID string, db *engine.Database) error {
+	legacyRecords, err := m.store.ListAppliedMigrations(ctx, databaseID)
+	if err != nil || len(legacyRecords) == 0 {
+		return err
+	}
+	stmts := make([]engine.Statement, 0, len(legacyRecords))
+	for _, rec := range legacyRecords {
+		vVal, _ := engine.NewTextValue(rec.Version)
+		nVal, _ := engine.NewTextValue(rec.Name)
+		cVal, _ := engine.NewTextValue(rec.Checksum)
+		tVal, _ := engine.NewTextValue(rec.AppliedAt.UTC().Format(time.RFC3339Nano))
+		bVal, _ := engine.NewTextValue(rec.AppliedBy)
+		stmts = append(stmts, engine.Statement{
+			SQL: `INSERT OR IGNORE INTO _litebase_migrations (version, name, checksum, applied_at, applied_by)
+			      VALUES (?, ?, ?, ?, ?)`,
+			Params: []engine.TypedValue{vVal, nVal, cVal, tVal, bVal},
+		})
+	}
+	_, err = db.ExecutePrivilegedBatch(ctx, stmts)
+	return err
 }
 
 func (m *Manager) Release(entry *ManagedEntry) {
@@ -235,23 +278,66 @@ func (m *Manager) DeleteDatabase(ctx context.Context, name string) error {
 }
 
 func (m *Manager) ReplaceDatabaseFile(ctx context.Context, name string, snapshotFilePath string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.closed {
-		return engine.ErrDatabaseClosed
-	}
 	record, err := m.store.GetDatabaseByName(ctx, control.DefaultProjectID, name)
 	if err != nil {
 		return err
 	}
-	if openEntry, ok := m.openDBs[name]; ok {
-		delete(m.openDBs, name)
+	openEntry, err := m.beginDatabaseRestore(name)
+	if err != nil {
+		return err
+	}
+	defer m.finishDatabaseRestore(name)
+
+	stagingPath := record.Path + ".restore-staging"
+	if err := copyFileContents(snapshotFilePath, stagingPath); err != nil {
+		return fmt.Errorf("stage snapshot file for restore: %w", err)
+	}
+
+	if openEntry != nil {
+		if err := waitForInFlightDrain(ctx, openEntry); err != nil {
+			_ = os.Remove(stagingPath)
+			return fmt.Errorf("wait for in-flight requests on %q before restore: %w", name, err)
+		}
 		if err := openEntry.DB.Close(ctx); err != nil {
-			return fmt.Errorf("drain open database %q before restore: %w", name, err)
+			_ = os.Remove(stagingPath)
+			return fmt.Errorf("close database %q before restore: %w", name, err)
 		}
 	}
-	return swapDatabaseFileOnDisk(record.Path, snapshotFilePath)
+	return m.swapStagedDatabaseFile(record.Path, stagingPath)
+}
+
+func (m *Manager) beginDatabaseRestore(name string) (*ManagedEntry, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return nil, engine.ErrDatabaseClosed
+	}
+	if _, busy := m.restoring[name]; busy {
+		return nil, ErrDatabaseRestoring
+	}
+	m.restoring[name] = struct{}{}
+	openEntry := m.openDBs[name]
+	delete(m.openDBs, name)
+	return openEntry, nil
+}
+
+func (m *Manager) finishDatabaseRestore(name string) {
+	m.mu.Lock()
+	delete(m.restoring, name)
+	m.mu.Unlock()
+}
+
+func waitForInFlightDrain(ctx context.Context, entry *ManagedEntry) error {
+	drainCtx, cancel := context.WithTimeout(ctx, defaultRestoreDrainTimeout)
+	defer cancel()
+	for entry.inFlight.Load() > 0 {
+		select {
+		case <-drainCtx.Done():
+			return drainCtx.Err()
+		case <-time.After(2 * time.Millisecond):
+		}
+	}
+	return nil
 }
 
 func (m *Manager) EvictIdle(ctx context.Context, maxIdle time.Duration) int {
@@ -295,21 +381,23 @@ func (m *Manager) CloseAll(ctx context.Context) error {
 	return errors.Join(closeErrs...)
 }
 
-func swapDatabaseFileOnDisk(targetDBPath string, sourceSnapshotPath string) error {
-	stagingPath := targetDBPath + ".restore-staging"
-	if err := copyFileContents(sourceSnapshotPath, stagingPath); err != nil {
-		return fmt.Errorf("stage snapshot file for restore: %w", err)
-	}
+func (m *Manager) swapStagedDatabaseFile(targetDBPath string, stagingPath string) error {
 	preRestorePath := targetDBPath + ".pre-restore"
+	hadOriginal := false
 	if _, err := os.Stat(targetDBPath); err == nil {
 		if err := os.Rename(targetDBPath, preRestorePath); err != nil {
 			_ = os.Remove(stagingPath)
 			return fmt.Errorf("backup target db to .pre-restore: %w", err)
 		}
+		hadOriginal = true
 	}
 	_ = os.Remove(targetDBPath + "-wal")
 	_ = os.Remove(targetDBPath + "-shm")
-	if err := os.Rename(stagingPath, targetDBPath); err != nil {
+	if err := m.renameFile(stagingPath, targetDBPath); err != nil {
+		_ = os.Remove(stagingPath)
+		if hadOriginal {
+			_ = os.Rename(preRestorePath, targetDBPath)
+		}
 		return fmt.Errorf("rename staged snapshot into place: %w", err)
 	}
 	return nil

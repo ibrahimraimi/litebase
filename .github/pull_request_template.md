@@ -21,4 +21,4 @@ Check all before review:
 
 - [ ] I have read [CONTRIBUTING.md](.github/CONTRIBUTING.md)
 - [ ] All tests pass under the race detector (`make race`) and static analysis (`make vet`)
-- [ ] If HTTP endpoints or payloads changed, I updated [api/openapi.yaml](api/openapi.yaml) and [docs/USEAGE.md](docs/USEAGE.md)
+- [ ] If HTTP endpoints or payloads changed, I updated [api/openapi.yaml](api/openapi.yaml) and [docs/USAGE.md](docs/USAGE.md)

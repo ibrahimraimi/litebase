@@ -254,6 +254,27 @@ func (s *Store) ListBranchRecords(ctx context.Context, parentDatabaseID string) 
 	return records, rows.Err()
 }
 
+func (s *Store) GetBranchRecord(ctx context.Context, parentDatabaseID string, branchName string) (BranchRecord, error) {
+	row := s.db.QueryRowContext(
+		ctx,
+		`SELECT id, database_id, parent_id, COALESCE(parent_snapshot_id, ''), name, created_at
+		 FROM branches
+		 WHERE parent_id = ? AND name = ?`,
+		parentDatabaseID,
+		branchName,
+	)
+	var rec BranchRecord
+	var createdStr string
+	if err := row.Scan(&rec.ID, &rec.DatabaseID, &rec.ParentID, &rec.ParentSnapshotID, &rec.Name, &createdStr); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return BranchRecord{}, ErrNotFound
+		}
+		return BranchRecord{}, err
+	}
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdStr)
+	return rec, nil
+}
+
 func (s *Store) DeleteBranchRecord(ctx context.Context, parentDatabaseID string, branchName string) error {
 	outcome, err := s.db.ExecContext(
 		ctx,

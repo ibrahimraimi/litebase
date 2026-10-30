@@ -8,7 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/litebase/litebase/internal/manager"
+	"github.com/ibrahimraimi/litebase/internal/manager"
 )
 
 type serverMetrics struct {
@@ -44,6 +44,11 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	principal, _ := principalFromContext(r.Context())
+	if !principal.CanAdmin() && !principal.CanReadDatabase("") {
+		writeProblem(w, http.StatusForbidden, CodeForbidden, "admin or project-wide read scope is required for /metrics")
+		return
+	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	var builder strings.Builder
 	s.appendHTTPMetrics(&builder)

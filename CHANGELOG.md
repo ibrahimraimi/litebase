@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.0.2-beta] - 2026-10-29
+
+### Changed
+
+- Migration history now lives inside each database (`_litebase_migrations`) and is applied in the same transaction as the migration. Existing data directories are upgraded on first open.
+- `branch merge` is now a three-way schema merge and never drops tables without `--allow-drop`. Added `--as-migration` to emit the schema diff as a numbered migration file.
+- Branch creation takes a single consistent snapshot; branches are namespaced per parent (`<parent>--<branch>`).
+
+### Fixed
+
+- Triggers (`CREATE [TEMP|TEMPORARY] TRIGGER ... BEGIN ...; END;`) and `[bracketed]` identifiers can be created via `/query`, `/batch`, and migrations.
+- Restore no longer blocks unrelated databases, drains in-flight requests before closing, and rolls back `.pre-restore` on rename failure.
+- `VACUUM INTO` snapshots run on a dedicated connection so active writes are not stalled.
+
+### Security
+
+- Per-connection SQLite limits (`SQLITE_LIMIT_LENGTH`, `SQL_LENGTH`, `VARIABLE_NUMBER`, `COMPOUND_SELECT`, `EXPR_DEPTH`, `LIKE_PATTERN_LENGTH`, `ATTACHED`) and response byte budget bound memory use.
+- Database size is enforced with `PRAGMA max_page_count`.
+- `/metrics` requires authentication.
+- Bootstrap admin token is created once if no admin token exists, not on every start.
+
+---
+
 ## [0.0.1-beta] - 2026-10-29
 
 ### Added

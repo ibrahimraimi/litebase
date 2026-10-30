@@ -12,7 +12,8 @@ import (
 type writeJob struct {
 	ctx        context.Context
 	statements []Statement
-	maxRows    int
+	limits     queryLimits
+	privileged bool
 	outcomes   []QueryResult
 	err        error
 	succeeded  bool
@@ -41,7 +42,7 @@ type Writer struct {
 	maintenance  chan *maintenanceJob
 	maxBatchSize int
 	batchWait    time.Duration
-	maxRows      int
+	limits       queryLimits
 	commitHook   func() error
 
 	isClosed              atomic.Bool
@@ -63,21 +64,37 @@ func NewWriter(conn *sql.Conn, secState *connectionSecurityState, opts Options) 
 		maintenance:  make(chan *maintenanceJob),
 		maxBatchSize: resolved.MaxBatchSize,
 		batchWait:    resolved.BatchWait,
-		maxRows:      resolved.MaxRows,
-		workerDone:   make(chan struct{}),
+		limits: queryLimits{
+			maxRows:          resolved.MaxRows,
+			maxResponseBytes: resolved.MaxResponseBytes,
+		},
+		workerDone: make(chan struct{}),
 	}
 	go writer.runLoop()
 	return writer
 }
 
 func (w *Writer) Submit(ctx context.Context, statements []Statement) ([]QueryResult, error) {
+	return w.submitJob(ctx, statements, false)
+}
+
+func (w *Writer) SubmitPrivileged(ctx context.Context, statements []Statement) ([]QueryResult, error) {
+	return w.submitJob(ctx, statements, true)
+}
+
+func (w *Writer) SetCommitHook(hook func() error) {
+	w.commitHook = hook
+}
+
+func (w *Writer) submitJob(ctx context.Context, statements []Statement, privileged bool) ([]QueryResult, error) {
 	if len(statements) == 0 {
 		return nil, ErrEmptyStatement
 	}
 	job := &writeJob{
 		ctx:        ctx,
 		statements: statements,
-		maxRows:    w.maxRows,
+		limits:     w.limits,
+		privileged: privileged,
 		done:       make(chan struct{}),
 	}
 	if err := w.enqueueJob(job); err != nil {
@@ -278,6 +295,10 @@ func (w *Writer) runJobWithSavepoint(bgCtx context.Context, idx int, job *writeJ
 		job.err = err
 		return false
 	}
+	if job.privileged && w.secState != nil {
+		w.secState.isPrivileged.Store(true)
+		defer w.secState.isPrivileged.Store(false)
+	}
 	savepointName := fmt.Sprintf("sp_%d", idx)
 	if _, err := w.conn.ExecContext(bgCtx, "SAVEPOINT "+savepointName); err != nil {
 		job.err = normalizeSQLiteError(err)
@@ -302,7 +323,7 @@ func (w *Writer) runJobWithSavepoint(bgCtx context.Context, idx int, job *writeJ
 func (w *Writer) executeJobStatements(job *writeJob) ([]QueryResult, error) {
 	outcomes := make([]QueryResult, 0, len(job.statements))
 	for _, stmt := range job.statements {
-		outcome, err := executeStatementOnConn(job.ctx, w.conn, stmt, job.maxRows)
+		outcome, err := executeStatementOnConn(job.ctx, w.conn, stmt, job.limits)
 		if err != nil {
 			return nil, err
 		}

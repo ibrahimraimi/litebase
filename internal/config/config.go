@@ -10,7 +10,7 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-var Version = "0.0.1-beta"
+var Version = "0.0.2-beta"
 
 const (
 	ConfigFileName        = "litebase.toml"
@@ -81,4 +81,3 @@ func Save(workDir string, cfg ProjectConfig) error {
 	}
 	return os.WriteFile(configPath, buf.Bytes(), 0o644)
 }
-

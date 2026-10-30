@@ -5,6 +5,9 @@ import (
 )
 
 func TestSaveAndLoadProjectConfig(t *testing.T) {
+	if Version != "0.0.2-beta" {
+		t.Fatalf("expected Version 0.0.2-beta, got %q", Version)
+	}
 	workDir := t.TempDir()
 	cfg := DefaultProjectConfig("billing-service")
 	cfg.Remote.URL = "https://db.example.com"
@@ -31,4 +34,3 @@ func TestSaveAndLoadProjectConfig(t *testing.T) {
 		t.Fatalf("expected default migrations dir %q, got %q", DefaultMigrationsDir, loaded.Migrations.Dir)
 	}
 }
-

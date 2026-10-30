@@ -8,7 +8,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/litebase/litebase/internal/engine"
+	"github.com/ibrahimraimi/litebase/internal/engine"
 	"github.com/spf13/cobra"
 )
 

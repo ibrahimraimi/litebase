@@ -9,10 +9,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/litebase/litebase/internal/auth"
-	"github.com/litebase/litebase/internal/control"
-	"github.com/litebase/litebase/internal/engine"
-	"github.com/litebase/litebase/internal/migrate"
+	"github.com/ibrahimraimi/litebase/internal/auth"
+	"github.com/ibrahimraimi/litebase/internal/control"
+	"github.com/ibrahimraimi/litebase/internal/engine"
+	"github.com/ibrahimraimi/litebase/internal/migrate"
 )
 
 var sqliteFileMagicHeader = []byte("SQLite format 3\x00")
@@ -69,7 +69,7 @@ func (s *Server) handleListMigrations(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	applied, err := s.store.ListAppliedMigrations(r.Context(), dbRec.ID)
+	applied, err := s.migrator.ListApplied(r.Context(), dbRec.Name)
 	if err != nil {
 		writeMappedError(w, err)
 		return
@@ -88,7 +88,7 @@ func (s *Server) handleApplyMigrations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.DryRun {
-		s.respondDryRunMigrations(w, r, dbRec.ID, req.Migrations)
+		s.respondDryRunMigrations(w, r, dbRec.Name, req.Migrations)
 		return
 	}
 	appliedVersions, err := s.migrator.ApplyPending(r.Context(), dbRec.Name, principal.ID, req.Migrations)
@@ -108,10 +108,10 @@ func (s *Server) handleApplyMigrations(w http.ResponseWriter, r *http.Request) {
 func (s *Server) respondDryRunMigrations(
 	w http.ResponseWriter,
 	r *http.Request,
-	databaseID string,
+	dbName string,
 	inputs []migrate.MigrationInput,
 ) {
-	plan, err := s.migrator.BuildPlan(r.Context(), databaseID, inputs)
+	plan, err := s.migrator.BuildPlan(r.Context(), dbName, inputs)
 	if err != nil {
 		writeMappedError(w, err)
 		return
@@ -251,7 +251,10 @@ func (s *Server) handleDiffBranch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	branchName := r.PathValue("branch")
-	diffSQL, err := s.branches.DiffSchema(r.Context(), parentRec.Name, branchName)
+	opts := migrate.DiffOptions{
+		AllowDrop: r.URL.Query().Get("allow_drop") == "true",
+	}
+	diffSQL, err := s.branches.DiffSchemaWithOptions(r.Context(), parentRec.Name, branchName, opts)
 	if err != nil {
 		writeMappedError(w, err)
 		return
@@ -265,7 +268,10 @@ func (s *Server) handleMergeBranch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	branchName := r.PathValue("branch")
-	mergedSQL, err := s.branches.MergeSchema(r.Context(), parentRec.Name, branchName)
+	opts := migrate.DiffOptions{
+		AllowDrop: r.URL.Query().Get("allow_drop") == "true",
+	}
+	mergedSQL, err := s.branches.MergeSchemaWithOptions(r.Context(), parentRec.Name, branchName, opts)
 	if err != nil {
 		writeMappedError(w, err)
 		return

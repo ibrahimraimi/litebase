@@ -30,6 +30,9 @@ jobs:
       - name: Run FuzzValidateName (30s)
         run: go test -fuzz=^FuzzValidateName$ -fuzztime=30s ./internal/engine/...
 
+      - name: Run FuzzSQLSplitterDifferential (30s)
+        run: go test -fuzz=^FuzzSQLSplitterDifferential$ -fuzztime=30s ./internal/engine/...
+
       - name: Run repeated SIGKILL crash durability loop
         run: go test -count=50 -v -run=^TestCrashDurabilityKill9$ ./internal/engine/...
 

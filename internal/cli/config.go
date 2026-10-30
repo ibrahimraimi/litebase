@@ -6,8 +6,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/litebase/litebase/internal/client"
-	"github.com/litebase/litebase/internal/config"
+	"github.com/ibrahimraimi/litebase/internal/client"
+	"github.com/ibrahimraimi/litebase/internal/config"
 )
 
 const (

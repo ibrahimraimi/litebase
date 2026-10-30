@@ -11,10 +11,11 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
-	"github.com/litebase/litebase/internal/control"
-	"github.com/litebase/litebase/internal/engine"
-	"github.com/litebase/litebase/internal/manager"
+	"github.com/ibrahimraimi/litebase/internal/control"
+	"github.com/ibrahimraimi/litebase/internal/engine"
+	"github.com/ibrahimraimi/litebase/internal/manager"
 )
 
 var (
@@ -110,15 +111,69 @@ func sortMigrations(migrations []MigrationInput) {
 	})
 }
 
+func (r *Runner) ListApplied(ctx context.Context, dbName string) ([]control.AppliedMigrationRecord, error) {
+	entry, err := r.mgr.Acquire(ctx, dbName)
+	if err != nil {
+		return nil, err
+	}
+	defer r.mgr.Release(entry)
+	return listAppliedFromDatabase(ctx, entry.DB, entry.Record.ID)
+}
+
+func listAppliedFromDatabase(
+	ctx context.Context,
+	db *engine.Database,
+	databaseID string,
+) ([]control.AppliedMigrationRecord, error) {
+	outcome, err := db.ExecuteReadOnly(ctx, engine.Statement{
+		SQL: `SELECT version, name, checksum, applied_at, applied_by
+		      FROM _litebase_migrations
+		      ORDER BY version ASC`,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query _litebase_migrations: %w", err)
+	}
+	records := make([]control.AppliedMigrationRecord, 0, len(outcome.Rows))
+	for _, row := range outcome.Rows {
+		if len(row) < 5 {
+			continue
+		}
+		appliedAt, _ := time.Parse(time.RFC3339Nano, derefString(row[3].Value))
+		records = append(records, control.AppliedMigrationRecord{
+			DatabaseID: databaseID,
+			Version:    derefString(row[0].Value),
+			Name:       derefString(row[1].Value),
+			Checksum:   derefString(row[2].Value),
+			AppliedAt:  appliedAt,
+			AppliedBy:  derefString(row[4].Value),
+		})
+	}
+	return records, nil
+}
+
 func (r *Runner) BuildPlan(
 	ctx context.Context,
+	dbName string,
+	inputs []MigrationInput,
+) (MigrationPlan, error) {
+	entry, err := r.mgr.Acquire(ctx, dbName)
+	if err != nil {
+		return MigrationPlan{}, err
+	}
+	defer r.mgr.Release(entry)
+	return buildPlanWithDB(ctx, entry.DB, entry.Record.ID, inputs)
+}
+
+func buildPlanWithDB(
+	ctx context.Context,
+	db *engine.Database,
 	databaseID string,
 	inputs []MigrationInput,
 ) (MigrationPlan, error) {
 	sorted := append([]MigrationInput(nil), inputs...)
 	sortMigrations(sorted)
 
-	applied, err := r.mgr.Store().ListAppliedMigrations(ctx, databaseID)
+	applied, err := listAppliedFromDatabase(ctx, db, databaseID)
 	if err != nil {
 		return MigrationPlan{}, err
 	}
@@ -166,55 +221,67 @@ func (r *Runner) ApplyPending(
 	}
 	defer r.mgr.Release(entry)
 
-	plan, err := r.BuildPlan(ctx, entry.Record.ID, inputs)
+	plan, err := buildPlanWithDB(ctx, entry.DB, entry.Record.ID, inputs)
 	if err != nil {
 		return nil, err
 	}
 	if len(plan.Pending) == 0 {
 		return []string{}, nil
 	}
-	if err := executePendingBatch(ctx, entry.DB, plan.Pending); err != nil {
+	if err := executePendingAndRecordInOneTx(ctx, entry.DB, actor, plan.Pending); err != nil {
 		return nil, err
 	}
-	return r.recordAppliedList(ctx, entry.Record.ID, actor, plan.Pending)
+	r.recordAuditCopyBestEffort(ctx, entry.Record.ID, actor, plan.Pending)
+	appliedVersions := make([]string, len(plan.Pending))
+	for i, mig := range plan.Pending {
+		appliedVersions[i] = mig.Version
+	}
+	return appliedVersions, nil
 }
 
-func executePendingBatch(ctx context.Context, db *engine.Database, pending []MigrationInput) error {
+func executePendingAndRecordInOneTx(
+	ctx context.Context,
+	db *engine.Database,
+	actor string,
+	pending []MigrationInput,
+) error {
 	var allStatements []engine.Statement
+	nowStr := time.Now().UTC().Format(time.RFC3339Nano)
 	for _, mig := range pending {
 		splitStmts := engine.SplitSQLStatements(mig.SQL)
 		for _, rawSQL := range splitStmts {
 			allStatements = append(allStatements, engine.Statement{SQL: rawSQL})
 		}
+		vVal, _ := engine.NewTextValue(mig.Version)
+		nVal, _ := engine.NewTextValue(mig.Name)
+		cVal, _ := engine.NewTextValue(ComputeChecksum(mig.SQL))
+		tVal, _ := engine.NewTextValue(nowStr)
+		bVal, _ := engine.NewTextValue(actor)
+		allStatements = append(allStatements, engine.Statement{
+			SQL: `INSERT INTO _litebase_migrations (version, name, checksum, applied_at, applied_by)
+			      VALUES (?, ?, ?, ?, ?)`,
+			Params: []engine.TypedValue{vVal, nVal, cVal, tVal, bVal},
+		})
 	}
-	if len(allStatements) == 0 {
-		return nil
-	}
-	_, err := db.ExecuteBatch(ctx, allStatements)
+	_, err := db.ExecutePrivilegedBatch(ctx, allStatements)
 	return err
 }
 
-func (r *Runner) recordAppliedList(
+func (r *Runner) recordAuditCopyBestEffort(
 	ctx context.Context,
 	databaseID string,
 	actor string,
 	pending []MigrationInput,
-) ([]string, error) {
-	appliedVersions := make([]string, 0, len(pending))
+) {
 	for _, mig := range pending {
-		err := r.mgr.Store().RecordAppliedMigration(ctx, control.AppliedMigrationRecord{
+		_ = r.mgr.Store().RecordAppliedMigration(ctx, control.AppliedMigrationRecord{
 			DatabaseID: databaseID,
 			Version:    mig.Version,
 			Name:       mig.Name,
 			Checksum:   ComputeChecksum(mig.SQL),
 			AppliedBy:  actor,
 		})
-		if err != nil {
-			return appliedVersions, err
-		}
-		appliedVersions = append(appliedVersions, mig.Version)
 	}
-	return appliedVersions, nil
 }
 
 func (r *Runner) lockForDatabase(dbName string) *sync.Mutex {
@@ -232,7 +299,10 @@ func InspectSchema(ctx context.Context, db *engine.Database) ([]SchemaObject, er
 	outcome, err := db.ExecuteReadOnly(ctx, engine.Statement{
 		SQL: `SELECT type, name, tbl_name, COALESCE(sql, '')
 		      FROM sqlite_master
-		      WHERE name NOT LIKE 'sqlite_%' AND sql IS NOT NULL AND sql != ''
+		      WHERE name NOT LIKE 'sqlite_%'
+		        AND name NOT LIKE '_litebase_%'
+		        AND tbl_name NOT LIKE '_litebase_%'
+		        AND sql IS NOT NULL AND sql != ''
 		      ORDER BY CASE type WHEN 'table' THEN 1 WHEN 'index' THEN 2 WHEN 'trigger' THEN 3 WHEN 'view' THEN 4 ELSE 5 END, name ASC`,
 	})
 	if err != nil {
@@ -253,58 +323,35 @@ func InspectSchema(ctx context.Context, db *engine.Database) ([]SchemaObject, er
 	return objects, nil
 }
 
-func GenerateSchemaDiffSQL(baseSchema []SchemaObject, targetSchema []SchemaObject) []string {
-	baseMap := indexSchemaByKey(baseSchema)
-	targetMap := indexSchemaByKey(targetSchema)
+func InspectSchemaFile(ctx context.Context, dbFilePath string) ([]SchemaObject, error) {
+	pool, err := engine.NewSQLiteEngine().OpenReaderPool(dbFilePath, engine.Options{ReaderPoolMax: 1})
+	if err != nil {
+		return nil, fmt.Errorf("open database file for schema inspection: %w", err)
+	}
+	defer pool.Close()
 
-	var statements []string
-	for _, targetObj := range targetSchema {
-		key := schemaKey(targetObj)
-		baseObj, exists := baseMap[key]
-		if !exists {
-			statements = append(statements, ensureTrailingSemicolon(targetObj.SQL))
-			continue
+	rows, err := pool.QueryContext(ctx, `
+		SELECT type, name, tbl_name, COALESCE(sql, '')
+		FROM sqlite_master
+		WHERE name NOT LIKE 'sqlite_%'
+		  AND name NOT LIKE '_litebase_%'
+		  AND tbl_name NOT LIKE '_litebase_%'
+		  AND sql IS NOT NULL AND sql != ''
+		ORDER BY CASE type WHEN 'table' THEN 1 WHEN 'index' THEN 2 WHEN 'trigger' THEN 3 WHEN 'view' THEN 4 ELSE 5 END, name ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("inspect sqlite_master schema from file: %w", err)
+	}
+	defer rows.Close()
+
+	var objects []SchemaObject
+	for rows.Next() {
+		var obj SchemaObject
+		if err := rows.Scan(&obj.Type, &obj.Name, &obj.TableName, &obj.SQL); err != nil {
+			return nil, fmt.Errorf("scan schema object: %w", err)
 		}
-		if normalizeSQLWhitespace(baseObj.SQL) != normalizeSQLWhitespace(targetObj.SQL) {
-			statements = append(statements,
-				fmt.Sprintf("DROP %s IF EXISTS %s;", strings.ToUpper(targetObj.Type), targetObj.Name),
-				ensureTrailingSemicolon(targetObj.SQL),
-			)
-		}
+		objects = append(objects, obj)
 	}
-	for _, baseObj := range baseSchema {
-		key := schemaKey(baseObj)
-		if _, stillExists := targetMap[key]; !stillExists {
-			statements = append(statements,
-				fmt.Sprintf("DROP %s IF EXISTS %s;", strings.ToUpper(baseObj.Type), baseObj.Name),
-			)
-		}
-	}
-	return statements
-}
-
-func indexSchemaByKey(objects []SchemaObject) map[string]SchemaObject {
-	indexed := make(map[string]SchemaObject, len(objects))
-	for _, obj := range objects {
-		indexed[schemaKey(obj)] = obj
-	}
-	return indexed
-}
-
-func schemaKey(obj SchemaObject) string {
-	return obj.Type + ":" + obj.Name
-}
-
-func normalizeSQLWhitespace(sqlText string) string {
-	return strings.Join(strings.Fields(strings.TrimSuffix(strings.TrimSpace(sqlText), ";")), " ")
-}
-
-func ensureTrailingSemicolon(sqlText string) string {
-	trimmed := strings.TrimSpace(sqlText)
-	if strings.HasSuffix(trimmed, ";") {
-		return trimmed
-	}
-	return trimmed + ";"
+	return objects, rows.Err()
 }
 
 func derefString(ptr *string) string {

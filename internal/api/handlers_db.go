@@ -7,11 +7,11 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/litebase/litebase/internal/auth"
-	"github.com/litebase/litebase/internal/control"
-	"github.com/litebase/litebase/internal/engine"
-	"github.com/litebase/litebase/internal/manager"
-	"github.com/litebase/litebase/internal/migrate"
+	"github.com/ibrahimraimi/litebase/internal/auth"
+	"github.com/ibrahimraimi/litebase/internal/control"
+	"github.com/ibrahimraimi/litebase/internal/engine"
+	"github.com/ibrahimraimi/litebase/internal/manager"
+	"github.com/ibrahimraimi/litebase/internal/migrate"
 )
 
 type createDatabaseRequest struct {
@@ -323,6 +323,20 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		Scopes:    tokRec.Scopes,
 		ExpiresAt: tokRec.ExpiresAt,
 	})
+}
+
+func (s *Server) handleListTokens(w http.ResponseWriter, r *http.Request) {
+	principal, _ := principalFromContext(r.Context())
+	if !principal.CanAdmin() {
+		writeProblem(w, http.StatusForbidden, CodeForbidden, "admin scope is required to list tokens")
+		return
+	}
+	tokens, err := s.store.ListTokens(r.Context(), control.DefaultProjectID)
+	if err != nil {
+		writeMappedError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tokens": tokens})
 }
 
 func (s *Server) handleRevokeToken(w http.ResponseWriter, r *http.Request) {

@@ -1,7 +1,7 @@
 package cli
 
 import (
-	"github.com/litebase/litebase/internal/config"
+	"github.com/ibrahimraimi/litebase/internal/config"
 	"github.com/spf13/cobra"
 )
 
@@ -31,6 +31,7 @@ func NewRootCommand() *cobra.Command {
 		newQueryCommand(flags),
 		newShellCommand(flags),
 		newDatabaseCommand(flags),
+		newTokenCommand(flags),
 		newSnapshotCommand(flags),
 		newBranchCommand(flags),
 		newPushCommand(flags),

@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/litebase/litebase/internal/auth"
-	"github.com/litebase/litebase/internal/engine"
+	"github.com/ibrahimraimi/litebase/internal/auth"
+	"github.com/ibrahimraimi/litebase/internal/engine"
 )
 
 func TestControlStoreLifecycle(t *testing.T) {
@@ -96,5 +96,45 @@ func TestControlStoreLifecycle(t *testing.T) {
 	}
 	if _, err := store.GetDatabaseByName(ctx, DefaultProjectID, "main"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound after SoftDeleteDatabase, got %v", err)
+	}
+}
+
+func TestTokenCacheInvalidationAndAdminCheck(t *testing.T) {
+	ctx := context.Background()
+	controlPath := filepath.Join(t.TempDir(), "control.db")
+	store, err := OpenStore(ctx, controlPath)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+
+	hasAdmin, err := store.HasAdminToken(ctx)
+	if err != nil || hasAdmin {
+		t.Fatalf("expected HasAdminToken=false on empty store, got %v, err=%v", hasAdmin, err)
+	}
+
+	tokRec, plaintext, err := store.CreateToken(ctx, CreateTokenParams{
+		Scopes: []auth.Scope{auth.ScopeAdmin},
+	})
+	if err != nil {
+		t.Fatalf("CreateToken: %v", err)
+	}
+
+	hasAdmin, err = store.HasAdminToken(ctx)
+	if err != nil || !hasAdmin {
+		t.Fatalf("expected HasAdminToken=true after creating admin token, got %v, err=%v", hasAdmin, err)
+	}
+
+	for i := 0; i < 5; i++ {
+		if _, err := store.AuthenticateToken(ctx, plaintext); err != nil {
+			t.Fatalf("cached AuthenticateToken(%d) failed: %v", i, err)
+		}
+	}
+
+	if err := store.RevokeToken(ctx, tokRec.ID); err != nil {
+		t.Fatalf("RevokeToken: %v", err)
+	}
+	if _, err := store.AuthenticateToken(ctx, plaintext); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected revoked token to fail immediately despite cache, got: %v", err)
 	}
 }

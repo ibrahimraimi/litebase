@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -201,6 +202,26 @@ func FuzzValidateName(f *testing.F) {
 		if err == nil {
 			if len(candidate) == 0 || len(candidate) > 63 {
 				t.Fatalf("invalid length accepted: %q", candidate)
+			}
+		}
+	})
+}
+
+func FuzzSQLSplitterDifferential(f *testing.F) {
+	f.Add("SELECT [a;b] FROM t")
+	f.Add("SELECT 1; SELECT 2")
+	f.Add("CREATE TRIGGER tr AFTER INSERT ON t BEGIN UPDATE t SET x = 1; END;")
+	f.Add("CREATE TRIGGER tr AFTER INSERT ON t BEGIN UPDATE t SET x = CASE WHEN 1 THEN 2 END; END; DROP TABLE t")
+	f.Add("SELECT 'a;b', \"c;d\", `e;f`, [g;h] -- comment ; here\n/* block ; */")
+
+	f.Fuzz(func(t *testing.T, sqlInput string) {
+		parts := SplitSQLStatements(sqlInput)
+		if len(parts) == 1 {
+			withSmuggled := sqlInput + "; SELECT 999"
+			if !hasMultipleStatements(withSmuggled) && !strings.Contains(strings.ToUpper(sqlInput), "TRIGGER") {
+				if validateErr := ValidateSingleStatement(withSmuggled); validateErr == nil {
+					t.Fatalf("splitter failed to detect second statement in %q", withSmuggled)
+				}
 			}
 		}
 	})

@@ -357,3 +357,146 @@ func mustTextValue(t *testing.T, text string) TypedValue {
 	}
 	return val
 }
+
+func TestTriggersAndBracketIdentifiers(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "triggers.sqlite")
+	db, err := OpenDatabase(ctx, NewSQLiteEngine(), dbPath, Options{})
+	if err != nil {
+		t.Fatalf("OpenDatabase: %v", err)
+	}
+	defer db.Close(ctx)
+
+	setupStmts := []Statement{
+		{SQL: "CREATE TABLE [a;b] (id INTEGER PRIMARY KEY, [val;1] TEXT, updated_count INTEGER DEFAULT 0)"},
+		{SQL: `CREATE TRIGGER trg_after_insert AFTER INSERT ON [a;b]
+BEGIN
+	UPDATE [a;b] SET updated_count = updated_count + 1 WHERE id = NEW.id;
+END;`},
+	}
+	if _, err := db.ExecuteBatch(ctx, setupStmts); err != nil {
+		t.Fatalf("ExecuteBatch with trigger and bracketed identifier failed: %v", err)
+	}
+
+	if _, err := db.Execute(ctx, Statement{
+		SQL: "INSERT INTO [a;b] ([val;1]) VALUES ('hello')",
+	}); err != nil {
+		t.Fatalf("insert into [a;b] failed: %v", err)
+	}
+
+	outcome, err := db.ExecuteReadOnly(ctx, Statement{
+		SQL: "SELECT [val;1], updated_count FROM [a;b] WHERE id = 1",
+	})
+	if err != nil {
+		t.Fatalf("select from [a;b] failed: %v", err)
+	}
+	if len(outcome.Rows) != 1 || *outcome.Rows[0][1].Value != "1" {
+		t.Fatalf("expected trigger to increment updated_count to 1, got: %+v", outcome.Rows)
+	}
+}
+
+func TestSQLiteLimitsResponseByteCapAndMaxPageCount(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "limits.sqlite")
+	db, err := OpenDatabase(ctx, NewSQLiteEngine(), dbPath, Options{
+		MaxResponseBytes: 512,
+		MaxDBSizeBytes:   64 * 1024,
+	})
+	if err != nil {
+		t.Fatalf("OpenDatabase: %v", err)
+	}
+	defer db.Close(ctx)
+
+	if _, err := db.ExecuteReadOnly(ctx, Statement{SQL: "SELECT zeroblob(1 << 26)"}); err == nil {
+		t.Fatal("expected SELECT zeroblob(1 << 26) to fail due to SQLITE_LIMIT_LENGTH")
+	}
+
+	if _, err := db.Execute(ctx, Statement{SQL: "CREATE TABLE blobs (id INTEGER PRIMARY KEY, payload TEXT)"}); err != nil {
+		t.Fatalf("create table blobs: %v", err)
+	}
+	for i := 0; i < 10; i++ {
+		if _, err := db.Execute(ctx, Statement{SQL: "INSERT INTO blobs (payload) VALUES ( printf('%0100d', 1) )"}); err != nil {
+			t.Fatalf("insert row %d: %v", i, err)
+		}
+	}
+
+	outcome, err := db.ExecuteReadOnly(ctx, Statement{SQL: "SELECT id, payload FROM blobs"})
+	if err != nil {
+		t.Fatalf("select blobs: %v", err)
+	}
+	if !outcome.Truncated || len(outcome.Rows) >= 10 {
+		t.Fatalf("expected response byte cap to truncate rows (Truncated=%v, len=%d)", outcome.Truncated, len(outcome.Rows))
+	}
+
+	oversizedBatch := make([]Statement, 0, 20)
+	for i := 0; i < 20; i++ {
+		oversizedBatch = append(oversizedBatch, Statement{
+			SQL: "INSERT INTO blobs (payload) VALUES ( hex(zeroblob(4096)) )",
+		})
+	}
+	if _, err := db.ExecuteBatch(ctx, oversizedBatch); err == nil {
+		t.Fatal("expected oversized batch to fail due to PRAGMA max_page_count")
+	}
+
+	countOut, err := db.ExecuteReadOnly(ctx, Statement{SQL: "SELECT COUNT(*) FROM blobs"})
+	if err != nil {
+		t.Fatalf("count blobs after failed batch: %v", err)
+	}
+	val, _ := countOut.Rows[0][0].ToDriverValue()
+	if val.(int64) != 10 {
+		t.Fatalf("expected failed oversized batch to roll back completely, got %d rows", val.(int64))
+	}
+}
+
+func TestVacuumIntoConcurrentWithWrites(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "live.sqlite")
+	snapPath := filepath.Join(t.TempDir(), "snap.sqlite")
+
+	db, err := OpenDatabase(ctx, NewSQLiteEngine(), dbPath, Options{})
+	if err != nil {
+		t.Fatalf("OpenDatabase: %v", err)
+	}
+	defer db.Close(ctx)
+
+	if _, err := db.Execute(ctx, Statement{SQL: "CREATE TABLE items (id INTEGER PRIMARY KEY, body TEXT)"}); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	for i := 0; i < 50; i++ {
+		if _, err := db.Execute(ctx, Statement{SQL: "INSERT INTO items (body) VALUES (hex(zeroblob(1024)))"}); err != nil {
+			t.Fatalf("seed row %d: %v", i, err)
+		}
+	}
+
+	stopCh := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stopCh:
+				return
+			default:
+				_, _ = db.Execute(ctx, Statement{SQL: "INSERT INTO items (body) VALUES ('concurrent-write')"})
+			}
+		}
+	}()
+
+	if err := db.VacuumInto(ctx, snapPath); err != nil {
+		close(stopCh)
+		wg.Wait()
+		t.Fatalf("VacuumInto during concurrent writes failed: %v", err)
+	}
+	close(stopCh)
+	wg.Wait()
+
+	snapDB, err := OpenDatabase(ctx, NewSQLiteEngine(), snapPath, Options{})
+	if err != nil {
+		t.Fatalf("OpenDatabase snapshot: %v", err)
+	}
+	defer snapDB.Close(ctx)
+	if err := snapDB.IntegrityCheck(ctx); err != nil {
+		t.Fatalf("snapshot IntegrityCheck failed: %v", err)
+	}
+}

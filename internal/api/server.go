@@ -6,11 +6,11 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/litebase/litebase/internal/branch"
-	"github.com/litebase/litebase/internal/control"
-	"github.com/litebase/litebase/internal/manager"
-	"github.com/litebase/litebase/internal/migrate"
-	"github.com/litebase/litebase/internal/snapshot"
+	"github.com/ibrahimraimi/litebase/internal/branch"
+	"github.com/ibrahimraimi/litebase/internal/control"
+	"github.com/ibrahimraimi/litebase/internal/manager"
+	"github.com/ibrahimraimi/litebase/internal/migrate"
+	"github.com/ibrahimraimi/litebase/internal/snapshot"
 )
 
 const (
@@ -94,7 +94,7 @@ func (s *Server) buildHandler() http.Handler {
 
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
-	mux.HandleFunc("GET /metrics", s.handleMetrics)
+	mux.HandleFunc("GET /metrics", s.requireAuth(s.handleMetrics))
 
 	mux.HandleFunc("POST /v1/databases", s.requireAuth(s.handleCreateDatabase))
 	mux.HandleFunc("GET /v1/databases", s.requireAuth(s.handleListDatabases))
@@ -121,6 +121,7 @@ func (s *Server) buildHandler() http.Handler {
 	mux.HandleFunc("POST /v1/databases/{db}/branches/{branch}/merge", s.requireAuth(s.handleMergeBranch))
 
 	mux.HandleFunc("POST /v1/tokens", s.requireAuth(s.handleCreateToken))
+	mux.HandleFunc("GET /v1/tokens", s.requireAuth(s.handleListTokens))
 	mux.HandleFunc("DELETE /v1/tokens/{id}", s.requireAuth(s.handleRevokeToken))
 
 	return applySecurityHeaders(s.withObservability(mux))

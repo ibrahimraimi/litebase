@@ -13,11 +13,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/litebase/litebase/internal/api"
-	"github.com/litebase/litebase/internal/auth"
-	"github.com/litebase/litebase/internal/control"
-	"github.com/litebase/litebase/internal/engine"
-	"github.com/litebase/litebase/internal/manager"
+	"github.com/ibrahimraimi/litebase/internal/api"
+	"github.com/ibrahimraimi/litebase/internal/auth"
+	"github.com/ibrahimraimi/litebase/internal/control"
+	"github.com/ibrahimraimi/litebase/internal/engine"
+	"github.com/ibrahimraimi/litebase/internal/manager"
 	"github.com/spf13/cobra"
 )
 
@@ -119,6 +119,13 @@ func bootstrapAdminToken(ctx context.Context, store *control.Store) (string, err
 		if err != nil && !errors.Is(err, control.ErrAlreadyExists) {
 			return "", err
 		}
+		return "", nil
+	}
+	hasAdmin, err := store.HasAdminToken(ctx)
+	if err != nil {
+		return "", err
+	}
+	if hasAdmin {
 		return "", nil
 	}
 	_, plaintext, err := store.CreateToken(ctx, control.CreateTokenParams{

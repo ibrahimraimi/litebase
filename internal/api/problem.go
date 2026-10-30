@@ -7,10 +7,10 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/litebase/litebase/internal/auth"
-	"github.com/litebase/litebase/internal/control"
-	"github.com/litebase/litebase/internal/engine"
-	"github.com/litebase/litebase/internal/migrate"
+	"github.com/ibrahimraimi/litebase/internal/auth"
+	"github.com/ibrahimraimi/litebase/internal/control"
+	"github.com/ibrahimraimi/litebase/internal/engine"
+	"github.com/ibrahimraimi/litebase/internal/migrate"
 )
 
 const (
@@ -66,10 +66,13 @@ func classifyError(err error) (int, string, string) {
 		errors.Is(err, engine.ErrEmptyStatement),
 		errors.Is(err, engine.ErrMultiStatementNotAllowed),
 		errors.Is(err, engine.ErrInteractiveTxNotSupported),
+		errors.Is(err, migrate.ErrDropTableNotAllowed),
+		errors.Is(err, migrate.ErrManualMigrationRequired),
 		errors.Is(err, auth.ErrInvalidScope):
 		return http.StatusBadRequest, CodeInvalidRequest, err.Error()
 	case errors.Is(err, migrate.ErrChecksumMismatch),
 		errors.Is(err, migrate.ErrDeployInProgress),
+		errors.Is(err, migrate.ErrMergeConflict),
 		errors.Is(err, control.ErrAlreadyExists):
 		return http.StatusConflict, CodeConflict, err.Error()
 	case errors.Is(err, control.ErrNotFound):

@@ -9,15 +9,18 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+
+	"github.com/mattn/go-sqlite3"
 )
 
 type Database struct {
-	path       string
-	opts       Options
-	writerPool *sql.DB
-	readerPool *sql.DB
-	writer     *Writer
-	isClosed   atomic.Bool
+	path               string
+	opts               Options
+	writerPool         *sql.DB
+	readerPool         *sql.DB
+	writer             *Writer
+	hadMigrationsTable bool
+	isClosed           atomic.Bool
 }
 
 func OpenDatabase(ctx context.Context, eng Engine, dbPath string, opts Options) (*Database, error) {
@@ -41,13 +44,44 @@ func OpenDatabase(ctx context.Context, eng Engine, dbPath string, opts Options) 
 		return nil, fmt.Errorf("open reader pool for %q: %w", dbPath, err)
 	}
 	writer := NewWriter(writerConn, secState, resolvedOpts)
-	return &Database{
+	db := &Database{
 		path:       dbPath,
 		opts:       resolvedOpts,
 		writerPool: writerPool,
 		readerPool: readerPool,
 		writer:     writer,
-	}, nil
+	}
+	if err := db.ensureInternalSchema(ctx); err != nil {
+		_ = db.Close(ctx)
+		return nil, err
+	}
+	return db, nil
+}
+
+func (db *Database) ensureInternalSchema(ctx context.Context) error {
+	existing, err := db.ExecuteReadOnly(ctx, Statement{
+		SQL: "SELECT name FROM sqlite_master WHERE type = 'table' AND name = '_litebase_migrations'",
+	})
+	if err == nil && len(existing.Rows) > 0 {
+		db.hadMigrationsTable = true
+		return nil
+	}
+	_, err = db.writer.SubmitPrivileged(ctx, []Statement{
+		{
+			SQL: `CREATE TABLE IF NOT EXISTS _litebase_migrations (
+				version    TEXT PRIMARY KEY,
+				name       TEXT NOT NULL,
+				checksum   TEXT NOT NULL,
+				applied_at TEXT NOT NULL,
+				applied_by TEXT NOT NULL
+			)`,
+		},
+	})
+	return err
+}
+
+func (db *Database) HadInternalMigrationsTable() bool {
+	return db.hadMigrationsTable
 }
 
 func (db *Database) Path() string {
@@ -107,6 +141,25 @@ func (db *Database) ExecuteBatch(ctx context.Context, statements []Statement) ([
 	return db.writer.Submit(ctx, statements)
 }
 
+func (db *Database) ExecutePrivilegedBatch(ctx context.Context, statements []Statement) ([]QueryResult, error) {
+	if db.isClosed.Load() {
+		return nil, ErrDatabaseClosed
+	}
+	if len(statements) == 0 {
+		return nil, ErrEmptyStatement
+	}
+	for idx, stmt := range statements {
+		if err := ValidateSingleStatement(stmt.SQL); err != nil {
+			return nil, fmt.Errorf("privileged batch statement %d: %w", idx, err)
+		}
+	}
+	return db.writer.SubmitPrivileged(ctx, statements)
+}
+
+func (db *Database) SetCommitHook(hook func() error) {
+	db.writer.SetCommitHook(hook)
+}
+
 func (db *Database) VacuumInto(ctx context.Context, destinationPath string) error {
 	if db.isClosed.Load() {
 		return ErrDatabaseClosed
@@ -114,13 +167,32 @@ func (db *Database) VacuumInto(ctx context.Context, destinationPath string) erro
 	if err := os.MkdirAll(filepath.Dir(destinationPath), 0o750); err != nil {
 		return fmt.Errorf("create snapshot directory: %w", err)
 	}
-	return db.writer.RunMaintenance(ctx, func(maintCtx context.Context, conn *sql.Conn) error {
-		_, err := conn.ExecContext(maintCtx, "VACUUM INTO ?", destinationPath)
-		if err != nil {
-			return fmt.Errorf("vacuum into %q: %w", destinationPath, err)
-		}
-		return nil
-	})
+	backupPool, err := openVacuumIntoPool(db.path)
+	if err != nil {
+		return err
+	}
+	defer backupPool.Close()
+
+	if _, err := backupPool.ExecContext(ctx, "VACUUM INTO ?", destinationPath); err != nil {
+		return fmt.Errorf("vacuum into %q: %w", destinationPath, err)
+	}
+	return nil
+}
+
+func openVacuumIntoPool(dbPath string) (*sql.DB, error) {
+	dsn := fmt.Sprintf("file:%s?_busy_timeout=%d", dbPath, defaultBusyTimeoutMS)
+	sqliteDriver := &sqlite3.SQLiteDriver{
+		ConnectHook: func(conn *sqlite3.SQLiteConn) error {
+			return execRawPragmas(conn, []string{
+				fmt.Sprintf("PRAGMA busy_timeout = %d", defaultBusyTimeoutMS),
+				"PRAGMA temp_store = MEMORY",
+			})
+		},
+	}
+	pool := sql.OpenDB(&dsnConnector{dsn: dsn, sqliteDriver: sqliteDriver})
+	pool.SetMaxOpenConns(1)
+	pool.SetMaxIdleConns(1)
+	return pool, nil
 }
 
 func (db *Database) Checkpoint(ctx context.Context) error {
@@ -172,7 +244,10 @@ func (db *Database) executeOnReaderPool(ctx context.Context, stmt Statement) (Qu
 	if !isReadOnly {
 		return QueryResult{}, fmt.Errorf("%w: statement is not read-only according to sqlite3_stmt_readonly", ErrReadOnlyViolation)
 	}
-	return executeStatementOnConn(ctx, readerConn, stmt, db.opts.MaxRows)
+	return executeStatementOnConn(ctx, readerConn, stmt, queryLimits{
+		maxRows:          db.opts.MaxRows,
+		maxResponseBytes: db.opts.MaxResponseBytes,
+	})
 }
 
 func isReadCandidate(sqlText string) bool {

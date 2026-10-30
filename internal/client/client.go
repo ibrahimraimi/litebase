@@ -13,11 +13,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/litebase/litebase/internal/api"
-	"github.com/litebase/litebase/internal/auth"
-	"github.com/litebase/litebase/internal/control"
-	"github.com/litebase/litebase/internal/engine"
-	"github.com/litebase/litebase/internal/migrate"
+	"github.com/ibrahimraimi/litebase/internal/api"
+	"github.com/ibrahimraimi/litebase/internal/auth"
+	"github.com/ibrahimraimi/litebase/internal/control"
+	"github.com/ibrahimraimi/litebase/internal/engine"
+	"github.com/ibrahimraimi/litebase/internal/migrate"
 )
 
 type Client struct {
@@ -270,24 +270,50 @@ func (c *Client) DeleteBranch(ctx context.Context, parentDBName string, branchNa
 }
 
 func (c *Client) DiffBranch(ctx context.Context, parentDBName string, branchName string) ([]string, error) {
+	return c.DiffBranchWithOptions(ctx, parentDBName, branchName, false)
+}
+
+func (c *Client) DiffBranchWithOptions(
+	ctx context.Context,
+	parentDBName string,
+	branchName string,
+	allowDrop bool,
+) ([]string, error) {
 	var wrapper struct {
 		Statements []string `json:"statements"`
 	}
+	path := fmt.Sprintf("/v1/databases/%s/branches/%s/diff", url.PathEscape(parentDBName), url.PathEscape(branchName))
+	if allowDrop {
+		path += "?allow_drop=true"
+	}
 	err := c.doJSON(ctx, requestOptions{
 		method:         http.MethodGet,
-		path:           fmt.Sprintf("/v1/databases/%s/branches/%s/diff", url.PathEscape(parentDBName), url.PathEscape(branchName)),
+		path:           path,
 		responseTarget: &wrapper,
 	})
 	return wrapper.Statements, err
 }
 
 func (c *Client) MergeBranch(ctx context.Context, parentDBName string, branchName string) ([]string, error) {
+	return c.MergeBranchWithOptions(ctx, parentDBName, branchName, false)
+}
+
+func (c *Client) MergeBranchWithOptions(
+	ctx context.Context,
+	parentDBName string,
+	branchName string,
+	allowDrop bool,
+) ([]string, error) {
 	var wrapper struct {
 		MergedStatements []string `json:"merged_statements"`
 	}
+	path := fmt.Sprintf("/v1/databases/%s/branches/%s/merge", url.PathEscape(parentDBName), url.PathEscape(branchName))
+	if allowDrop {
+		path += "?allow_drop=true"
+	}
 	err := c.doJSON(ctx, requestOptions{
 		method:         http.MethodPost,
-		path:           fmt.Sprintf("/v1/databases/%s/branches/%s/merge", url.PathEscape(parentDBName), url.PathEscape(branchName)),
+		path:           path,
 		responseTarget: &wrapper,
 	})
 	return wrapper.MergedStatements, err
@@ -319,6 +345,25 @@ func (c *Client) CreateToken(
 		responseTarget: &created,
 	})
 	return created, err
+}
+
+func (c *Client) ListTokens(ctx context.Context) ([]auth.TokenRecord, error) {
+	var wrapper struct {
+		Tokens []auth.TokenRecord `json:"tokens"`
+	}
+	err := c.doJSON(ctx, requestOptions{
+		method:         http.MethodGet,
+		path:           "/v1/tokens",
+		responseTarget: &wrapper,
+	})
+	return wrapper.Tokens, err
+}
+
+func (c *Client) RevokeToken(ctx context.Context, tokenID string) error {
+	return c.doJSON(ctx, requestOptions{
+		method: http.MethodDelete,
+		path:   fmt.Sprintf("/v1/tokens/%s", url.PathEscape(tokenID)),
+	})
 }
 
 func (c *Client) DownloadDatabase(ctx context.Context, dbName string, destinationPath string) (int64, error) {
