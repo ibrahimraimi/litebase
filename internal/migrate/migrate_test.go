@@ -6,9 +6,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/litebase/litebase/internal/control"
-	"github.com/litebase/litebase/internal/engine"
-	"github.com/litebase/litebase/internal/manager"
+	"github.com/ibrahimraimi/litebase/internal/control"
+	"github.com/ibrahimraimi/litebase/internal/engine"
+	"github.com/ibrahimraimi/litebase/internal/manager"
+	"github.com/ibrahimraimi/litebase/internal/snapshot"
 )
 
 func TestMigrationsOrderIdempotencyChecksumAndRollback(t *testing.T) {
@@ -82,5 +83,85 @@ func TestMigrationsOrderIdempotencyChecksumAndRollback(t *testing.T) {
 		if obj.Name == "comments" {
 			t.Fatal("expected table 'comments' from 0003 to be rolled back when 0004 failed in the same deploy")
 		}
+	}
+}
+
+func TestMigrationHistoryLivesInDatabaseFile(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	store, err := control.OpenStore(ctx, filepath.Join(dataDir, "control.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+
+	mgr, err := manager.NewManager(manager.Config{DataDir: dataDir, Store: store})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	defer mgr.CloseAll(ctx)
+
+	if _, err := mgr.CreateDatabase(ctx, "app", engine.DurabilityNormal); err != nil {
+		t.Fatalf("CreateDatabase: %v", err)
+	}
+
+	runner := NewRunner(mgr)
+	snapSvc := snapshot.NewService(mgr)
+
+	migs12 := []MigrationInput{
+		{Version: "0001", Name: "0001_users.sql", SQL: "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT, updates INT DEFAULT 0);"},
+		{Version: "0002", Name: "0002_trigger.sql", SQL: "CREATE TRIGGER trg_u AFTER UPDATE ON users BEGIN SELECT 1; END;"},
+	}
+
+	entry, err := mgr.Acquire(ctx, "app")
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	entry.DB.SetCommitHook(func() error {
+		return errors.New("simulated crash before commit")
+	})
+	mgr.Release(entry)
+
+	if _, err := runner.ApplyPending(ctx, "app", "actor", migs12); err == nil {
+		t.Fatal("expected ApplyPending to fail when commitHook returns an error")
+	}
+
+	entry, _ = mgr.Acquire(ctx, "app")
+	entry.DB.SetCommitHook(nil)
+	mgr.Release(entry)
+
+	appliedAfterCrash, err := runner.ListApplied(ctx, "app")
+	if err != nil || len(appliedAfterCrash) != 0 {
+		t.Fatalf("expected 0 applied migrations after crash rollback, got %v (err %v)", appliedAfterCrash, err)
+	}
+
+	if _, err := runner.ApplyPending(ctx, "app", "actor", migs12); err != nil {
+		t.Fatalf("ApplyPending 0001..0002: %v", err)
+	}
+
+	snapAfter2, err := snapSvc.Create(ctx, "app", "after-0002")
+	if err != nil {
+		t.Fatalf("snapshot Create: %v", err)
+	}
+
+	migs123 := append(migs12, MigrationInput{
+		Version: "0003",
+		Name:    "0003_posts.sql",
+		SQL:     "CREATE TABLE posts (id INTEGER PRIMARY KEY, title TEXT);",
+	})
+	if _, err := runner.ApplyPending(ctx, "app", "actor", migs123); err != nil {
+		t.Fatalf("ApplyPending 0003: %v", err)
+	}
+
+	if _, err := snapSvc.Restore(ctx, "app", snapAfter2.ID); err != nil {
+		t.Fatalf("snapshot Restore: %v", err)
+	}
+
+	planAfterRestore, err := runner.BuildPlan(ctx, "app", migs123)
+	if err != nil {
+		t.Fatalf("BuildPlan after restore: %v", err)
+	}
+	if len(planAfterRestore.Pending) != 1 || planAfterRestore.Pending[0].Version != "0003" {
+		t.Fatalf("expected only 0003 pending after restoring to after-0002 snapshot, got %+v", planAfterRestore.Pending)
 	}
 }

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/litebase/litebase/internal/auth"
+	"github.com/ibrahimraimi/litebase/internal/auth"
 )
 
 type CreateTokenParams struct {
@@ -92,7 +92,19 @@ func (s *Store) SaveGeneratedToken(
 }
 
 func (s *Store) AuthenticateToken(ctx context.Context, plaintext string) (auth.TokenRecord, error) {
+	now := time.Now().UTC()
 	tokenHash := auth.HashToken(plaintext)
+	if cached, ok := s.lookupCachedToken(tokenHash, now); ok {
+		if !auth.VerifyTokenHash(plaintext, cached.Hash) {
+			return auth.TokenRecord{}, ErrNotFound
+		}
+		if cached.IsExpired(now) {
+			return auth.TokenRecord{}, auth.ErrTokenExpired
+		}
+		s.recordTokenUsed(ctx, cached.ID, now)
+		return cached, nil
+	}
+
 	row := s.db.QueryRowContext(
 		ctx,
 		`SELECT id, project_id, COALESCE(database_id, ''), prefix, hash, scopes,
@@ -108,12 +120,70 @@ func (s *Store) AuthenticateToken(ctx context.Context, plaintext string) (auth.T
 	if !auth.VerifyTokenHash(plaintext, record.Hash) {
 		return auth.TokenRecord{}, ErrNotFound
 	}
-	if record.IsExpired(time.Now().UTC()) {
+	if record.IsExpired(now) {
 		return auth.TokenRecord{}, auth.ErrTokenExpired
 	}
-	nowStr := time.Now().UTC().Format(time.RFC3339Nano)
-	_, _ = s.db.ExecContext(ctx, `UPDATE tokens SET last_used_at = ? WHERE id = ?`, nowStr, record.ID)
+	s.storeCachedToken(tokenHash, record, now)
+	s.recordTokenUsed(ctx, record.ID, now)
 	return record, nil
+}
+
+func (s *Store) lookupCachedToken(tokenHash string, now time.Time) (auth.TokenRecord, bool) {
+	s.cacheMu.RLock()
+	defer s.cacheMu.RUnlock()
+	entry, ok := s.tokenCache[tokenHash]
+	if !ok || !now.Before(entry.expiresAt) {
+		return auth.TokenRecord{}, false
+	}
+	return entry.record, true
+}
+
+func (s *Store) storeCachedToken(tokenHash string, record auth.TokenRecord, now time.Time) {
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	s.tokenCache[tokenHash] = cachedTokenEntry{
+		record:    record,
+		expiresAt: now.Add(defaultTokenCacheTTL),
+	}
+}
+
+func (s *Store) recordTokenUsed(ctx context.Context, tokenID string, now time.Time) {
+	var toFlush map[string]time.Time
+	s.cacheMu.Lock()
+	s.lastUsed[tokenID] = now
+	if now.Sub(s.lastFlushAt) >= defaultLastUsedFlushInterval {
+		toFlush = s.lastUsed
+		s.lastUsed = make(map[string]time.Time)
+		s.lastFlushAt = now
+	}
+	s.cacheMu.Unlock()
+
+	if len(toFlush) > 0 {
+		s.flushLastUsedMap(ctx, toFlush)
+	}
+}
+
+func (s *Store) flushPendingLastUsed(ctx context.Context) {
+	s.cacheMu.Lock()
+	toFlush := s.lastUsed
+	s.lastUsed = make(map[string]time.Time)
+	s.lastFlushAt = time.Now().UTC()
+	s.cacheMu.Unlock()
+
+	if len(toFlush) > 0 {
+		s.flushLastUsedMap(ctx, toFlush)
+	}
+}
+
+func (s *Store) flushLastUsedMap(ctx context.Context, updates map[string]time.Time) {
+	for tokenID, usedAt := range updates {
+		_, _ = s.db.ExecContext(
+			ctx,
+			`UPDATE tokens SET last_used_at = ? WHERE id = ?`,
+			usedAt.UTC().Format(time.RFC3339Nano),
+			tokenID,
+		)
+	}
 }
 
 func (s *Store) RevokeToken(ctx context.Context, tokenID string) error {
@@ -125,7 +195,62 @@ func (s *Store) RevokeToken(ctx context.Context, tokenID string) error {
 	if affected == 0 {
 		return fmt.Errorf("%w: token %q", ErrNotFound, tokenID)
 	}
+	s.invalidateTokenCacheByID(tokenID)
 	return nil
+}
+
+func (s *Store) invalidateTokenCacheByID(tokenID string) {
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	delete(s.lastUsed, tokenID)
+	for hash, entry := range s.tokenCache {
+		if entry.record.ID == tokenID {
+			delete(s.tokenCache, hash)
+		}
+	}
+}
+
+func (s *Store) HasAdminToken(ctx context.Context) (bool, error) {
+	tokens, err := s.ListTokens(ctx, DefaultProjectID)
+	if err != nil {
+		return false, err
+	}
+	now := time.Now().UTC()
+	for _, tok := range tokens {
+		if !tok.IsExpired(now) && tok.CanAdmin() {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *Store) ListTokens(ctx context.Context, projectID string) ([]auth.TokenRecord, error) {
+	if projectID == "" {
+		projectID = DefaultProjectID
+	}
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT id, project_id, COALESCE(database_id, ''), prefix, hash, scopes,
+		        COALESCE(expires_at, ''), COALESCE(last_used_at, ''), created_at
+		 FROM tokens
+		 WHERE project_id = ?
+		 ORDER BY created_at ASC`,
+		projectID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list tokens: %w", err)
+	}
+	defer rows.Close()
+
+	var records []auth.TokenRecord
+	for rows.Next() {
+		rec, err := scanTokenRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, rec)
+	}
+	return records, rows.Err()
 }
 
 func scanTokenRow(scanner rowScanner) (auth.TokenRecord, error) {

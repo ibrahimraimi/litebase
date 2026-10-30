@@ -9,11 +9,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/litebase/litebase/internal/api"
-	"github.com/litebase/litebase/internal/auth"
-	"github.com/litebase/litebase/internal/cli"
-	"github.com/litebase/litebase/internal/control"
-	"github.com/litebase/litebase/internal/manager"
+	"github.com/ibrahimraimi/litebase/internal/api"
+	"github.com/ibrahimraimi/litebase/internal/auth"
+	"github.com/ibrahimraimi/litebase/internal/cli"
+	"github.com/ibrahimraimi/litebase/internal/control"
+	"github.com/ibrahimraimi/litebase/internal/manager"
 )
 
 func TestEndToEndCLIAndServerWorkflow(t *testing.T) {
@@ -99,9 +99,20 @@ func verifySnapshotsAndBranchesCLI(t *testing.T, projectDir string, adminToken s
 		t.Fatalf("expected CREATE TABLE invoices in branch diff output, got: %s", diffOut)
 	}
 
+	asMigOut := runCLI(t, projectDir, adminToken, "branch", "merge", "feat-billing", "--as-migration")
+	if !strings.Contains(asMigOut, "0002_merge_feat-billing.sql") {
+		t.Fatalf("expected --as-migration to create 0002_merge_feat-billing.sql, got: %s", asMigOut)
+	}
+	_ = os.Remove(filepath.Join(projectDir, "migrations", "0002_merge_feat-billing.sql"))
+
 	mergeOut := runCLI(t, projectDir, adminToken, "branch", "merge", "feat-billing")
 	if !strings.Contains(mergeOut, "Merged 1 schema statement(s)") {
 		t.Fatalf("unexpected branch merge output: %s", mergeOut)
+	}
+
+	tokenListOut := runCLI(t, projectDir, adminToken, "token", "list")
+	if !strings.Contains(tokenListOut, "admin") {
+		t.Fatalf("expected admin token in token list output, got: %s", tokenListOut)
 	}
 
 	runCLI(t, projectDir, adminToken, "query", "--remote", "INSERT INTO invoices (total_cents) VALUES (1999)")

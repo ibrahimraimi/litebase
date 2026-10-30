@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/litebase/litebase/internal/auth"
-	"github.com/litebase/litebase/internal/control"
+	"github.com/ibrahimraimi/litebase/internal/auth"
+	"github.com/ibrahimraimi/litebase/internal/control"
 )
 
 type contextKey string

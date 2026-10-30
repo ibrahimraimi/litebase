@@ -13,10 +13,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/litebase/litebase/internal/auth"
-	"github.com/litebase/litebase/internal/control"
-	"github.com/litebase/litebase/internal/engine"
-	"github.com/litebase/litebase/internal/manager"
+	"github.com/ibrahimraimi/litebase/internal/auth"
+	"github.com/ibrahimraimi/litebase/internal/control"
+	"github.com/ibrahimraimi/litebase/internal/engine"
+	"github.com/ibrahimraimi/litebase/internal/manager"
 )
 
 type testEnv struct {
@@ -229,9 +229,18 @@ func TestRateLimitingAndMetrics(t *testing.T) {
 		t.Fatalf("expected Retry-After: 1 header on 429, got %q", resp.Header.Get("Retry-After"))
 	}
 
-	metricsResp := doJSONRequest(t, env.server.URL, http.MethodGet, "/metrics", "", nil)
+	unauthMetricsResp := doJSONRequest(t, env.server.URL, http.MethodGet, "/metrics", "", nil)
+	assertProblemCode(t, unauthMetricsResp, http.StatusUnauthorized, CodeUnauthorized)
+
+	_, metricsToken, err := env.mgr.Store().CreateToken(context.Background(), control.CreateTokenParams{
+		Scopes: []auth.Scope{auth.ScopeRead},
+	})
+	if err != nil {
+		t.Fatalf("CreateToken for metrics: %v", err)
+	}
+	metricsResp := doJSONRequest(t, env.server.URL, http.MethodGet, "/metrics", metricsToken, nil)
 	if metricsResp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200 on /metrics, got %d", metricsResp.StatusCode)
+		t.Fatalf("expected 200 on authenticated /metrics, got %d", metricsResp.StatusCode)
 	}
 	bodyBytes, _ := io.ReadAll(metricsResp.Body)
 	_ = metricsResp.Body.Close()

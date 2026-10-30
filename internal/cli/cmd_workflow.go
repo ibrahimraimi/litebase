@@ -7,9 +7,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/litebase/litebase/internal/client"
-	"github.com/litebase/litebase/internal/engine"
-	"github.com/litebase/litebase/internal/migrate"
+	"github.com/ibrahimraimi/litebase/internal/client"
+	"github.com/ibrahimraimi/litebase/internal/engine"
+	"github.com/ibrahimraimi/litebase/internal/migrate"
 	"github.com/spf13/cobra"
 )
 
@@ -103,9 +103,18 @@ func newMigrateNewCommand(flags *RuntimeFlags) *cobra.Command {
 }
 
 func createNewMigrationFile(cmd *cobra.Command, workDir string, rawName string) error {
+	relPath, err := createMigrationFileWithContent(workDir, rawName, "")
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Created %s\n", relPath)
+	return nil
+}
+
+func createMigrationFileWithContent(workDir string, rawName string, sqlBody string) (string, error) {
 	cleanSlug := strings.ToLower(strings.TrimSpace(rawName))
 	if err := engine.ValidateName(cleanSlug); err != nil {
-		return fmt.Errorf("invalid migration name %q: %w", rawName, err)
+		return "", fmt.Errorf("invalid migration name %q: %w", rawName, err)
 	}
 	cfg, err := LoadProjectConfig(workDir)
 	if err != nil {
@@ -113,21 +122,20 @@ func createNewMigrationFile(cmd *cobra.Command, workDir string, rawName string) 
 	}
 	migDir := filepath.Join(workDir, cfg.Migrations.Dir)
 	if err := os.MkdirAll(migDir, 0o750); err != nil {
-		return err
+		return "", err
 	}
 	existing, err := migrate.LoadDirectoryMigrations(migDir)
 	if err != nil {
-		return err
+		return "", err
 	}
 	nextSeq := computeNextMigrationSequence(existing)
 	filename := fmt.Sprintf("%04d_%s.sql", nextSeq, cleanSlug)
 	fullPath := filepath.Join(migDir, filename)
-	template := fmt.Sprintf("-- Migration: %s\n\n", filename)
-	if err := os.WriteFile(fullPath, []byte(template), 0o644); err != nil {
-		return fmt.Errorf("write migration file %q: %w", fullPath, err)
+	content := fmt.Sprintf("-- Migration: %s\n\n%s", filename, sqlBody)
+	if err := os.WriteFile(fullPath, []byte(content), 0o644); err != nil {
+		return "", fmt.Errorf("write migration file %q: %w", fullPath, err)
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "Created %s\n", filepath.Join(cfg.Migrations.Dir, filename))
-	return nil
+	return filepath.Join(cfg.Migrations.Dir, filename), nil
 }
 
 func computeNextMigrationSequence(existing []migrate.MigrationInput) int {

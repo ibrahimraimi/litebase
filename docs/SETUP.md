@@ -211,5 +211,5 @@ When `litebase serve` receives `SIGINT` or `SIGTERM`:
 
 ## Next Steps
 
-- Continue to **[Usage & API Reference](./USEAGE.md)** for step-by-step CLI workflows (`migrate`, `deploy`, `snapshot`, `branch`) and full `/v1` HTTP endpoint examples.
+- Continue to **[Usage & API Reference](./USAGE.md)** for step-by-step CLI workflows (`migrate`, `deploy`, `snapshot`, `branch`) and full `/v1` HTTP endpoint examples.
 

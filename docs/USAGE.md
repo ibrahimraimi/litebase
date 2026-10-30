@@ -357,3 +357,24 @@ All error responses return `Content-Type: application/problem+json` with a machi
 | `timeout` | `504 Gateway Timeout` | Query or batch exceeded the configured execution timeout (`sqlite3_interrupt`). |
 | `internal_error` | `500` or `503` | Unexpected storage or control-plane error. |
 
+---
+
+## 6. Migration History & Upgrading from `0.0.1-beta`
+
+Starting in `0.0.2-beta`, applied migration history is stored inside each SQLite database file in the internal `_litebase_migrations` table and recorded in the same atomic transaction as the migration DDL.
+
+- **Automatic Upgrade**: When `0.0.2-beta` opens an existing `0.0.1-beta` database that does not yet have `_litebase_migrations`, it automatically creates `_litebase_migrations` and copies that database's applied migration records from `control.db`.
+- **Portable State**: Because `_litebase_migrations` lives inside the `.sqlite` file, snapshots (`snapshot restore`), branches (`branch create`), and whole-file transfers (`litebase pull` / `litebase push --force`) carry their exact migration history with them.
+- **Authorizer Protection**: User queries and batches cannot modify `_litebase_migrations` directly; only the internal migration runner can write to it.
+
+---
+
+## 7. Known Limitations
+
+- **No interactive multi-request HTTP transactions**: Use `/v1/databases/{db}/batch` for atomic multi-statement transactions.
+- **Copy-based branches**: `branch create` takes a single `VACUUM INTO` snapshot and copies it to the branch database path (`<parent>--<branch>`).
+- **Three-way schema merge**: `branch merge` automatically merges new tables/indexes/triggers/views and additive `ALTER TABLE ... ADD COLUMN` changes. Non-additive column edits require a manual SQL migration (`litebase branch merge <branch> --as-migration`), and dropping tables requires `--allow-drop`.
+- **Single-node architecture**: Designed for single-node vertical scale on local SSD/NVMe volumes.
+- **Token granularity**: Tokens are scoped to `read`, `write`, or `admin` (project-wide or per-database).
+
+

@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/litebase/litebase/internal/engine"
+	"github.com/ibrahimraimi/litebase/internal/engine"
 )
 
 type DatabaseRecord struct {
@@ -84,7 +84,46 @@ func (s *Store) GetDatabaseByName(ctx context.Context, projectID string, name st
 		projectID,
 		name,
 	)
-	return scanDatabaseRow(row)
+	rec, err := scanDatabaseRow(row)
+	if err == nil {
+		return rec, nil
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return DatabaseRecord{}, err
+	}
+	return s.findUniqueBranchDatabase(ctx, projectID, name)
+}
+
+func (s *Store) findUniqueBranchDatabase(ctx context.Context, projectID string, branchName string) (DatabaseRecord, error) {
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT d.id, d.project_id, d.name, d.path, d.durability, d.size_bytes, d.created_at
+		 FROM databases d
+		 JOIN branches b ON b.database_id = d.id
+		 WHERE d.project_id = ? AND b.name = ? AND d.deleted_at IS NULL`,
+		projectID,
+		branchName,
+	)
+	if err != nil {
+		return DatabaseRecord{}, err
+	}
+	defer rows.Close()
+
+	var matches []DatabaseRecord
+	for rows.Next() {
+		rec, err := scanDatabaseRow(rows)
+		if err != nil {
+			return DatabaseRecord{}, err
+		}
+		matches = append(matches, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return DatabaseRecord{}, err
+	}
+	if len(matches) == 1 {
+		return matches[0], nil
+	}
+	return DatabaseRecord{}, ErrNotFound
 }
 
 func (s *Store) GetDatabaseByID(ctx context.Context, databaseID string) (DatabaseRecord, error) {

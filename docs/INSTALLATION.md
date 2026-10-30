@@ -20,7 +20,7 @@ Litebase ships as a **single binary** (`litebase`) that includes both the HTTP c
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/litebase/litebase.git
+git clone https://github.com/ibrahimraimi/litebase.git
 cd litebase
 ```
 
@@ -143,5 +143,5 @@ If you are building Litebase from source or contributing changes, run the built-
 ## Next Steps
 
 - Proceed to **[Setup & Configuration](./SETUP.md)** to configure authentication tokens, project files (`litebase.toml`), TLS, and storage layout.
-- Or jump straight to **[Usage & API Reference](./USEAGE.md)** to create databases, run migrations, and branch schemas.
+- Or jump straight to **[Usage & API Reference](./USAGE.md)** to create databases, run migrations, and branch schemas.
 

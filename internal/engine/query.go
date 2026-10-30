@@ -7,14 +7,19 @@ import (
 	"time"
 )
 
+type queryLimits struct {
+	maxRows          int
+	maxResponseBytes int
+}
+
 type preparedExecution struct {
 	sqlText    string
 	driverArgs []any
-	maxRows    int
+	limits     queryLimits
 	startTime  time.Time
 }
 
-func executeStatementOnConn(ctx context.Context, conn *sql.Conn, stmt Statement, maxRows int) (QueryResult, error) {
+func executeStatementOnConn(ctx context.Context, conn *sql.Conn, stmt Statement, limits queryLimits) (QueryResult, error) {
 	if err := ValidateSingleStatement(stmt.SQL); err != nil {
 		return QueryResult{}, err
 	}
@@ -25,7 +30,7 @@ func executeStatementOnConn(ctx context.Context, conn *sql.Conn, stmt Statement,
 	execSpec := preparedExecution{
 		sqlText:    stmt.SQL,
 		driverArgs: driverArgs,
-		maxRows:    maxRows,
+		limits:     limits,
 		startTime:  time.Now(),
 	}
 	if producesResultRows(stmt.SQL) {
@@ -74,7 +79,7 @@ func executeRowQuery(
 	if err != nil {
 		return QueryResult{}, normalizeSQLiteError(err)
 	}
-	collectedRows, isTruncated, err := scanRowsWithCap(rowsCursor, len(columns), spec.maxRows)
+	collectedRows, isTruncated, err := scanRowsWithCap(rowsCursor, len(columns), spec.limits)
 	if err != nil {
 		return QueryResult{}, err
 	}
@@ -86,7 +91,7 @@ func executeRowQuery(
 	}, nil
 }
 
-func scanRowsWithCap(rowsCursor *sql.Rows, columnCount int, maxRows int) ([][]TypedValue, bool, error) {
+func scanRowsWithCap(rowsCursor *sql.Rows, columnCount int, limits queryLimits) ([][]TypedValue, bool, error) {
 	collected := make([][]TypedValue, 0)
 	rawCells := make([]any, columnCount)
 	scanTargets := make([]any, columnCount)
@@ -95,8 +100,9 @@ func scanRowsWithCap(rowsCursor *sql.Rows, columnCount int, maxRows int) ([][]Ty
 	}
 
 	isTruncated := false
+	accumulatedBytes := 0
 	for rowsCursor.Next() {
-		if maxRows > 0 && len(collected) >= maxRows {
+		if limits.maxRows > 0 && len(collected) >= limits.maxRows {
 			isTruncated = true
 			break
 		}
@@ -107,12 +113,29 @@ func scanRowsWithCap(rowsCursor *sql.Rows, columnCount int, maxRows int) ([][]Ty
 		if err != nil {
 			return nil, false, err
 		}
+		rowBytes := estimateTypedRowBytes(typedRow)
+		if limits.maxResponseBytes > 0 && accumulatedBytes+rowBytes > limits.maxResponseBytes {
+			isTruncated = true
+			break
+		}
+		accumulatedBytes += rowBytes
 		collected = append(collected, typedRow)
 	}
 	if err := rowsCursor.Err(); err != nil {
 		return nil, false, normalizeSQLiteError(err)
 	}
 	return collected, isTruncated, nil
+}
+
+func estimateTypedRowBytes(row []TypedValue) int {
+	total := 16
+	for _, cell := range row {
+		total += len(cell.Type) + 16
+		if cell.Value != nil {
+			total += len(*cell.Value)
+		}
+	}
+	return total
 }
 
 func convertScannedRow(rawCells []any) ([]TypedValue, error) {
@@ -157,6 +180,10 @@ func extractUnquotedTokens(sqlText string) []string {
 		ch := sqlText[idx]
 		if ch == '\'' || ch == '"' || ch == '`' {
 			idx = advancePastQuotedLiteral(sqlText, idx, ch)
+			continue
+		}
+		if ch == '[' {
+			idx = advancePastBracketIdentifier(sqlText, idx)
 			continue
 		}
 		if idx+1 < length && ch == '-' && sqlText[idx+1] == '-' {

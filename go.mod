@@ -1,4 +1,4 @@
-module github.com/litebase/litebase
+module github.com/ibrahimraimi/litebase
 
 go 1.23.0
 

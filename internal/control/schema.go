@@ -9,14 +9,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
+	"github.com/ibrahimraimi/litebase/internal/auth"
 	"github.com/mattn/go-sqlite3"
 )
 
 const (
-	DefaultProjectID   = "proj_default"
-	DefaultProjectName = "default"
+	DefaultProjectID             = "proj_default"
+	DefaultProjectName           = "default"
+	defaultTokenCacheTTL         = 30 * time.Second
+	defaultLastUsedFlushInterval = 5 * time.Second
 )
 
 var (
@@ -24,8 +28,17 @@ var (
 	ErrAlreadyExists = errors.New("record already exists")
 )
 
+type cachedTokenEntry struct {
+	record    auth.TokenRecord
+	expiresAt time.Time
+}
+
 type Store struct {
-	db *sql.DB
+	db          *sql.DB
+	cacheMu     sync.RWMutex
+	tokenCache  map[string]cachedTokenEntry
+	lastUsed    map[string]time.Time
+	lastFlushAt time.Time
 }
 
 func OpenStore(ctx context.Context, controlDBPath string) (*Store, error) {
@@ -41,7 +54,12 @@ func OpenStore(ctx context.Context, controlDBPath string) (*Store, error) {
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(0)
 
-	store := &Store{db: db}
+	store := &Store{
+		db:          db,
+		tokenCache:  make(map[string]cachedTokenEntry),
+		lastUsed:    make(map[string]time.Time),
+		lastFlushAt: time.Now().UTC(),
+	}
 	if err := store.migrateSchema(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -54,6 +72,7 @@ func (s *Store) Ping(ctx context.Context) error {
 }
 
 func (s *Store) Close() error {
+	s.flushPendingLastUsed(context.Background())
 	return s.db.Close()
 }
 

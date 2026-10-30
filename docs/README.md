@@ -12,7 +12,7 @@ Litebase brings a Postgres- and Supabase-inspired developer workflow—**migrati
 |---|---|
 | **[Installation](./INSTALLATION.md)** | Build from source, run with Docker, and verify your environment. |
 | **[Setup & Configuration](./SETUP.md)** | Configure `litebase serve`, `litebase.toml`, scoped API tokens, TLS, and data directories. |
-| **[Usage & API Reference](./USEAGE.md)** | End-to-end CLI workflows (`init`, `migrate`, `deploy`, `snapshot`, `branch`) and REST API reference. |
+| **[Usage & API Reference](./USAGE.md)** | End-to-end CLI workflows (`init`, `migrate`, `deploy`, `snapshot`, `branch`) and REST API reference. |
 | **[OpenAPI 3.1 Specification](../api/openapi.yaml)** | Machine-readable contract for all `/v1` HTTP endpoints and schemas. |
 
 ---

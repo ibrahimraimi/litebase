@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/litebase/litebase/internal/cli"
+	"github.com/ibrahimraimi/litebase/internal/cli"
 )
 
 func main() {

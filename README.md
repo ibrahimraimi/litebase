@@ -15,7 +15,7 @@ Explore the full documentation in [`/docs`](./docs/README.md).
 | **[Overview & Architecture](./docs/README.md)** | Concurrency model, durability modes (`normal` vs. `full`), security model, and design boundaries. |
 | **[Installation Guide](./docs/INSTALLATION.md)** | Source builds, Docker container setup, and verification commands. |
 | **[Setup & Configuration](./docs/SETUP.md)** | `litebase serve` vs. `litebase dev`, `litebase.toml`, scoped tokens (`read`, `write`, `admin`), TLS, and storage layout. |
-| **[Usage & API Reference](./docs/USEAGE.md)** | End-to-end CLI workflows (`migrate`, `deploy`, `query`, `shell`, `snapshot`, `branch`) and `/v1` REST API reference. |
+| **[Usage & API Reference](./docs/USAGE.md)** | End-to-end CLI workflows (`migrate`, `deploy`, `query`, `shell`, `snapshot`, `branch`) and `/v1` REST API reference. |
 | **[OpenAPI 3.1 Spec](./api/openapi.yaml)** | Full OpenAPI contract for all `/v1` endpoints and RFC 9457 Problem Details responses. |
 
 ---
@@ -51,6 +51,15 @@ Explore the full documentation in [`/docs`](./docs/README.md).
 
   control.db (SQLite): projects, databases, tokens, migrations_applied, snapshots, branches, audit_log
 ```
+
+---
+
+## Known Limitations
+
+- **No interactive HTTP transactions**: `BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`, and `RELEASE` over `/query` are rejected so slow clients cannot hold the single SQLite writer lock. Use `/batch` for multi-statement atomic transactions.
+- **Copy-based branches**: Branches are created from a consistent `VACUUM INTO` snapshot rather than page-level copy-on-write, which is ideal for small-to-medium SQLite databases.
+- **Single-node control plane**: Litebase runs on a single host backed by local disk/NVMe and does not include distributed Raft/Paxos replication.
+- **Token scopes**: Bearer tokens support `read`, `write`, and `admin` scopes (optionally bound to a single database), not row-level or table-level ACLs.
 
 ---
 

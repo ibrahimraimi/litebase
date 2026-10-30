@@ -19,12 +19,20 @@ const (
 	DurabilityNormal DurabilityMode = "normal"
 	DurabilityFull   DurabilityMode = "full"
 
-	defaultBusyTimeoutMS     = 5000
-	defaultWALAutoCheckpoint = 1000
-	defaultReaderPoolSize    = 8
-	defaultMaxRows           = 10000
-	defaultMaxQueueDepth     = 4096
-	defaultMaxBatchSize      = 64
+	defaultBusyTimeoutMS        = 5000
+	defaultWALAutoCheckpoint    = 1000
+	defaultReaderPoolSize       = 8
+	defaultMaxRows              = 10000
+	defaultMaxQueueDepth        = 4096
+	defaultMaxBatchSize         = 64
+	defaultMaxBlobOrTextBytes   = 16 * 1024 * 1024
+	defaultMaxSQLLength         = 1 * 1024 * 1024
+	defaultMaxVariableNumber    = 999
+	defaultMaxCompoundSelect    = 500
+	defaultMaxExprDepth         = 100
+	defaultMaxLikePatternLength = 50000
+	defaultMaxResponseBytes     = 16 * 1024 * 1024
+	defaultSQLitePageSizeBytes  = 4096
 )
 
 var (
@@ -38,12 +46,20 @@ var (
 )
 
 type Options struct {
-	Durability    DurabilityMode
-	ReaderPoolMax int
-	MaxRows       int
-	MaxQueueDepth int
-	MaxBatchSize  int
-	BatchWait     time.Duration
+	Durability           DurabilityMode
+	ReaderPoolMax        int
+	MaxRows              int
+	MaxResponseBytes     int
+	MaxQueueDepth        int
+	MaxBatchSize         int
+	BatchWait            time.Duration
+	MaxDBSizeBytes       int64
+	MaxBlobOrTextBytes   int
+	MaxSQLLength         int
+	MaxVariableNumber    int
+	MaxCompoundSelect    int
+	MaxExprDepth         int
+	MaxLikePatternLength int
 }
 
 func (opts Options) withDefaults() Options {
@@ -57,11 +73,37 @@ func (opts Options) withDefaults() Options {
 	if resolved.MaxRows <= 0 {
 		resolved.MaxRows = defaultMaxRows
 	}
+	if resolved.MaxResponseBytes <= 0 {
+		resolved.MaxResponseBytes = defaultMaxResponseBytes
+	}
 	if resolved.MaxQueueDepth <= 0 {
 		resolved.MaxQueueDepth = defaultMaxQueueDepth
 	}
 	if resolved.MaxBatchSize <= 0 {
 		resolved.MaxBatchSize = defaultMaxBatchSize
+	}
+	return resolved.withSQLiteLimitDefaults()
+}
+
+func (opts Options) withSQLiteLimitDefaults() Options {
+	resolved := opts
+	if resolved.MaxBlobOrTextBytes <= 0 {
+		resolved.MaxBlobOrTextBytes = defaultMaxBlobOrTextBytes
+	}
+	if resolved.MaxSQLLength <= 0 {
+		resolved.MaxSQLLength = defaultMaxSQLLength
+	}
+	if resolved.MaxVariableNumber <= 0 {
+		resolved.MaxVariableNumber = defaultMaxVariableNumber
+	}
+	if resolved.MaxCompoundSelect <= 0 {
+		resolved.MaxCompoundSelect = defaultMaxCompoundSelect
+	}
+	if resolved.MaxExprDepth <= 0 {
+		resolved.MaxExprDepth = defaultMaxExprDepth
+	}
+	if resolved.MaxLikePatternLength <= 0 {
+		resolved.MaxLikePatternLength = defaultMaxLikePatternLength
 	}
 	return resolved
 }
@@ -97,9 +139,10 @@ func (e *SQLiteEngine) OpenWriterPool(dbPath string, opts Options) (*sql.DB, *co
 	dsn := buildWriterDSN(dbPath)
 	sqliteDriver := &sqlite3.SQLiteDriver{
 		ConnectHook: func(conn *sqlite3.SQLiteConn) error {
-			if err := applyWriterPragmas(conn, resolvedOpts.Durability); err != nil {
+			if err := applyWriterPragmas(conn, resolvedOpts); err != nil {
 				return err
 			}
+			applyConnectionLimits(conn, resolvedOpts)
 			registerWriterAuthorizer(conn, secState)
 			return nil
 		},
@@ -122,7 +165,7 @@ func (e *SQLiteEngine) OpenReaderPool(dbPath string, opts Options) (*sql.DB, err
 			if err := applyReaderPragmas(conn); err != nil {
 				return err
 			}
-			conn.SetLimit(sqlite3.SQLITE_LIMIT_ATTACHED, 0)
+			applyConnectionLimits(conn, resolvedOpts)
 			registerReaderAuthorizer(conn)
 			return nil
 		},
@@ -132,6 +175,16 @@ func (e *SQLiteEngine) OpenReaderPool(dbPath string, opts Options) (*sql.DB, err
 	pool.SetMaxIdleConns(resolvedOpts.ReaderPoolMax)
 	pool.SetConnMaxLifetime(0)
 	return pool, nil
+}
+
+func applyConnectionLimits(conn *sqlite3.SQLiteConn, opts Options) {
+	conn.SetLimit(sqlite3.SQLITE_LIMIT_ATTACHED, 0)
+	conn.SetLimit(sqlite3.SQLITE_LIMIT_LENGTH, opts.MaxBlobOrTextBytes)
+	conn.SetLimit(sqlite3.SQLITE_LIMIT_SQL_LENGTH, opts.MaxSQLLength)
+	conn.SetLimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, opts.MaxVariableNumber)
+	conn.SetLimit(sqlite3.SQLITE_LIMIT_COMPOUND_SELECT, opts.MaxCompoundSelect)
+	conn.SetLimit(sqlite3.SQLITE_LIMIT_EXPR_DEPTH, opts.MaxExprDepth)
+	conn.SetLimit(sqlite3.SQLITE_LIMIT_LIKE_PATTERN_LENGTH, opts.MaxLikePatternLength)
 }
 
 type dsnConnector struct {
@@ -159,9 +212,9 @@ func buildReaderDSN(dbPath string) string {
 	return fmt.Sprintf("file:%s?%s", dbPath, query.Encode())
 }
 
-func applyWriterPragmas(conn *sqlite3.SQLiteConn, durability DurabilityMode) error {
+func applyWriterPragmas(conn *sqlite3.SQLiteConn, opts Options) error {
 	syncValue := "NORMAL"
-	if durability == DurabilityFull {
+	if opts.Durability == DurabilityFull {
 		syncValue = "FULL"
 	}
 	pragmas := []string{
@@ -171,6 +224,13 @@ func applyWriterPragmas(conn *sqlite3.SQLiteConn, durability DurabilityMode) err
 		fmt.Sprintf("PRAGMA busy_timeout = %d", defaultBusyTimeoutMS),
 		fmt.Sprintf("PRAGMA wal_autocheckpoint = %d", defaultWALAutoCheckpoint),
 		"PRAGMA temp_store = MEMORY",
+	}
+	if opts.MaxDBSizeBytes > 0 {
+		maxPages := opts.MaxDBSizeBytes / defaultSQLitePageSizeBytes
+		if maxPages < 1 {
+			maxPages = 1
+		}
+		pragmas = append(pragmas, fmt.Sprintf("PRAGMA max_page_count = %d", maxPages))
 	}
 	return execRawPragmas(conn, pragmas)
 }
