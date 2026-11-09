@@ -125,36 +125,88 @@ litebase> .exit
 
 ---
 
-## 3. Snapshots & Point-in-Time Recovery
+## 3. Snapshots, Scheduled Backups & Disaster Recovery
 
-Litebase creates consistent online backups using SQLite's `VACUUM INTO` without blocking readers, and performs atomic restores with automatic pre-restore backups.
+Litebase creates consistent online backups using SQLite's `VACUUM INTO` without blocking readers, verifies SHA-256 checksums and `PRAGMA integrity_check` before any restore, and supports scheduled local and S3-compatible remote backups.
 
-### Create a snapshot
+### Create, Pin, List, Delete & Prune Snapshots
 
 ```bash
-litebase snapshot create --label pre-release
+# Create a manual snapshot (add --pin to protect it from deletion and pruning)
+litebase snapshot create --label pre-release --pin
 # Created snapshot snap_94a1f02b8c12e301 (label=pre-release, size=16384 bytes)
-```
 
-### List snapshots
-
-```bash
+# List local snapshots (or pass --remote to list objects in remote backup storage)
 litebase snapshot list
-# snap_94a1f02b8c12e301	pre-release	16384 bytes	2026-10-29T15:10:00Z
+litebase snapshot list --remote
+
+# Delete an unpinned snapshot that is not referenced by an active branch
+litebase snapshot delete snap_94a1f02b8c12e301
+
+# Preview or run retention pruning
+litebase snapshot prune --dry-run
+litebase snapshot prune
 ```
 
-### Restore a database from a snapshot
+**Retention Rules**:
+- `scheduled` snapshots are pruned according to the database's backup policy (`keep_last` and `keep_days`).
+- Automatic `pre-restore` and `pre-push` snapshots are capped (`keep_last = 5`, `keep_days = 7`).
+- `manual` snapshots, `branch` parent snapshots, and any snapshot with `pinned = true` are **never** auto-pruned.
+
+### Scheduled Backups & Verification Drills (`litebase backup`)
+
+Backup policies are opt-in per database:
 
 ```bash
+# Enable hourly scheduled backups, keeping the last 24 and 14 days, and uploading to remote storage
+litebase backup policy set --every 1h --keep-last 24 --keep-days 14 --remote
+
+# Inspect or disable the policy
+litebase backup policy show
+litebase backup policy disable
+
+# Trigger an immediate backup and inspect status
+litebase backup run
+litebase backup status
+
+# Run a non-destructive restore drill in a temporary directory (never touches the live database)
+litebase backup verify --remote --sample users
+```
+
+### Restore a Database (Local, Remote, or Into a New Database)
+
+```bash
+# Restore the active database from a local snapshot ID
 litebase snapshot restore snap_94a1f02b8c12e301
-# Restored "main" to snapshot snap_94a1f02b8c12e301
+
+# Restore from the latest remote backup
+litebase snapshot restore --from-remote latest
+
+# Restore a snapshot or remote backup into a new database for side-by-side inspection
+litebase snapshot restore --from-remote latest --as main_recovery_check
 ```
 
 During a restore, Litebase:
-1. Automatically takes a safety snapshot labeled `pre-restore`.
-2. Drains and closes active connections on the target database.
-3. Removes stale `-wal` and `-shm` files and atomically replaces the database file with the snapshot copy.
-4. Reopens the database and runs `PRAGMA integrity_check`.
+1. Verifies the snapshot's SHA-256 checksum and runs read-only `PRAGMA integrity_check` before touching the live database.
+2. Automatically takes a safety snapshot labeled `pre-restore`.
+3. Drains and closes active connections on the target database.
+4. Atomically replaces the database file, removes stale `-wal` and `-shm` files, and runs `PRAGMA integrity_check`.
+
+### Disaster Recovery from an Empty Disk (`restore-control`)
+
+If the server's disk is lost and remote backups (`--remote`) were enabled:
+
+```bash
+# 1. Restore control.db (tokens, database records, branches, policies, and audit log) before starting the server
+litebase restore-control --from-remote latest --data-dir /var/lib/litebase
+
+# 2. Start the Litebase server against the restored data directory
+litebase serve --data-dir /var/lib/litebase
+
+# 3. Restore each database from its latest remote backup and verify it
+litebase snapshot restore --database main --from-remote latest
+litebase backup verify --db main --remote
+```
 
 ### Whole-File Download & Upload (`pull` & `push --force`)
 
@@ -248,9 +300,17 @@ All `/v1` endpoints expect `Authorization: Bearer lbk_<token>` and JSON request 
 | `GET` | `/v1/databases/{db}/schema` | `read` | Inspect all user tables, indexes, triggers, and views |
 | `GET` | `/v1/databases/{db}/migrations` | `read` | List applied migrations and their SHA-256 checksums |
 | `POST` | `/v1/databases/{db}/migrations/apply` | `write` | Apply ordered migrations (or preview with `"dry_run": true`) |
-| `POST` | `/v1/databases/{db}/snapshots` | `write` | Create a consistent snapshot via `VACUUM INTO` |
-| `GET` | `/v1/databases/{db}/snapshots` | `read` | List snapshots for `{db}` |
-| `POST` | `/v1/databases/{db}/restore` | `write` | Restore `{db}` from a `snapshot_id` |
+| `POST` | `/v1/databases/{db}/snapshots` | `write` | Create a consistent snapshot via `VACUUM INTO` (optional `"pinned": true`) |
+| `GET` | `/v1/databases/{db}/snapshots` | `read` | List local snapshots for `{db}` (or remote backups with `?remote=true`) |
+| `DELETE` | `/v1/databases/{db}/snapshots/{id}` | `admin` | Delete a snapshot (refuses pinned or branch-referenced snapshots with `409 SNAPSHOT_PROTECTED`) |
+| `POST` | `/v1/databases/{db}/snapshots/prune` | `admin` | Prune expired snapshots according to retention policy (`"dry_run": true` to preview) |
+| `GET` | `/v1/databases/{db}/backup-policy` | `read` | Get the backup schedule and retention policy for `{db}` |
+| `PUT` | `/v1/databases/{db}/backup-policy` | `admin` | Set and enable the backup schedule and retention policy for `{db}` |
+| `DELETE` | `/v1/databases/{db}/backup-policy` | `admin` | Disable scheduled backups for `{db}` |
+| `POST` | `/v1/databases/{db}/backups/run` | `admin` | Trigger an immediate backup run (snapshot + optional remote upload + prune) |
+| `GET` | `/v1/databases/{db}/backups/status` | `read` | Get last backup run, last success, next scheduled run, and pending upload count |
+| `POST` | `/v1/databases/{db}/backups/verify` | `admin` | Run a non-destructive restore drill on the latest local or remote backup |
+| `POST` | `/v1/databases/{db}/restore` | `admin` | Restore `{db}` from `snapshot_id` or `remote_key` (optional `"as": "<new-db>"`) |
 | `GET` | `/v1/databases/{db}/download` | `read` | Download a consistent `VACUUM INTO` copy of `{db}` (`litebase pull`) |
 | `PUT` | `/v1/databases/{db}/upload?force=true` | `write` | Overwrite `{db}` with an uploaded SQLite 3 file after `integrity_check` (`litebase push --force`) |
 | `POST` | `/v1/databases/{db}/branches` | `write` | Create an isolated branch copy from `{db}` |
@@ -351,7 +411,8 @@ All error responses return `Content-Type: application/problem+json` with a machi
 | `unauthorized` | `401 Unauthorized` | Missing, malformed, expired, or revoked `lbk_` Bearer token. |
 | `forbidden` | `403 Forbidden` | Insufficient token scope (`read` token attempting a write) or statement blocked by `sqlite3_set_authorizer`. |
 | `not_found` | `404 Not Found` | Target database, branch, snapshot, or token ID does not exist. |
-| `conflict` | `409 Conflict` | Database or branch with that name already exists. |
+| `conflict` | `409 Conflict` | Database or branch with that name already exists, or snapshot SHA-256 checksum mismatch. |
+| `SNAPSHOT_PROTECTED` | `409 Conflict` | Snapshot is pinned or referenced by an active branch and cannot be deleted. |
 | `busy` | `503 Service Unavailable` | SQLite engine returned `SQLITE_BUSY` / lock contention. |
 | `queue_full` | `429` or `503` | Per-token rate limit exceeded or writer actor queue is full (includes `Retry-After: 1` header). |
 | `timeout` | `504 Gateway Timeout` | Query or batch exceeded the configured execution timeout (`sqlite3_interrupt`). |

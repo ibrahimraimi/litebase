@@ -15,7 +15,7 @@ Litebase is in **beta (0.0.x)**. APIs, file formats and CLI commands can still c
 | 0.0.0 | Inception: positioning, scope and design | Done (no release) |
 | 0.0.1-beta | It works | Shipped |
 | 0.0.2-beta | Trust | Shipped |
-| 0.0.3-beta | Survive | Planned |
+| 0.0.3-beta | Survive | Shipped |
 
 ### 0.0.0: Inception
 
@@ -42,7 +42,7 @@ Correctness and safety, no new features.
 - Safer restore that does not block other databases.
 - Authenticated `/metrics`, a one-time bootstrap token, and a token cache.
 
-### 0.0.3-beta: Survive (planned)
+### 0.0.3-beta: Survive
 
 The goal: if the disk dies or a restore goes wrong, you get your data back.
 
@@ -68,10 +68,10 @@ Release gate: crash tests for snapshot and restore pass, and a full disaster-rec
 
 ## Not planned
 
-- **Support for other databases** (PostgreSQL, MySQL and others). See [ADR 0001](docs/adr/0001-sqlite-only.md).
+- **Support for other databases** (PostgreSQL, MySQL and others). See [ADR 0001](/docs/adr/0001-sqlite-only.md).
 - **Replication, consensus or multi-node clustering.**
-- **Interactive transactions over HTTP.** Use `/batch`. See [ADR 0004](docs/adr/0004-no-interactive-transactions.md).
-- **Merging data between branches.** Merge is schema-only. See [ADR 0011](docs/adr/0011-branches-are-copies-schema-only-merge.md).
+- **Interactive transactions over HTTP.** Use `/batch`. See [ADR 0004](/docs/adr/0004-no-interactive-transactions.md).
+- **Merging data between branches.** Merge is schema-only. See [ADR 0011](/docs/adr/0011-branches-are-copies-schema-only-merge.md).
 
 ## Influence the roadmap
 

@@ -42,6 +42,9 @@ jobs:
       - name: Run repeated SIGKILL snapshot crash recovery loop
         run: go test -count=50 -v -run=^TestSnapshotCrashRecoveryLeavesNoUnrecordedFilesOrTmp$ ./internal/snapshot/...
 
+      - name: Run repeated SIGKILL backup upload crash recovery loop
+        run: go test -count=50 -v -run=^TestBackupKillDuringUploadLeavesPendingAndNextRunReuploads$ ./internal/backup/...
+
       - name: Run engine benchmarks
         run: make bench
 

@@ -55,4 +55,3 @@ func TestAtomicReplaceSuccessAndInjectedSyncFailures(t *testing.T) {
 		t.Fatalf("unexpected dst2 contents: %q, err=%v", string(gotBytes), err)
 	}
 }
-

@@ -14,9 +14,11 @@ import (
 	"time"
 
 	"github.com/ibrahimraimi/litebase/internal/auth"
+	"github.com/ibrahimraimi/litebase/internal/backup"
 	"github.com/ibrahimraimi/litebase/internal/control"
 	"github.com/ibrahimraimi/litebase/internal/engine"
 	"github.com/ibrahimraimi/litebase/internal/manager"
+	"github.com/ibrahimraimi/litebase/internal/snapshot"
 )
 
 type testEnv struct {
@@ -197,6 +199,12 @@ func TestOpenAPIContractSpecPresence(t *testing.T) {
 		"/v1/databases/{db}/migrations/apply:",
 		"/v1/databases/{db}/schema:",
 		"/v1/databases/{db}/snapshots:",
+		"/v1/databases/{db}/snapshots/{id}:",
+		"/v1/databases/{db}/snapshots/prune:",
+		"/v1/databases/{db}/backup-policy:",
+		"/v1/databases/{db}/backups/run:",
+		"/v1/databases/{db}/backups/status:",
+		"/v1/databases/{db}/backups/verify:",
 		"/v1/databases/{db}/restore:",
 		"/v1/databases/{db}/branches:",
 		"/v1/tokens:",
@@ -253,12 +261,143 @@ func TestRateLimitingAndMetrics(t *testing.T) {
 		`litebase_queue_depth{db="main"}`,
 		`litebase_batch_size{db="main"}`,
 		`litebase_commit_latency_seconds_total{db="main"}`,
+		`litebase_backup_last_success_timestamp_seconds{db="main"}`,
+		`litebase_backup_last_duration_seconds{db="main"}`,
+		`litebase_backup_failures_total{db="main"}`,
+		`litebase_backup_upload_bytes_total`,
+		`litebase_snapshots{db="main",kind="manual"}`,
+		`litebase_snapshot_bytes{db="main"}`,
 	}
 	for _, metricName := range requiredMetrics {
 		if !strings.Contains(metricsText, metricName) {
 			t.Fatalf("expected metric %q in /metrics output, got:\n%s", metricName, metricsText)
 		}
 	}
+}
+
+func TestBackupSnapshotsAndPolicyEndpoints(t *testing.T) {
+	blobRoot := t.TempDir()
+	blobStore, err := backup.NewLocalDirStore(blobRoot, "")
+	if err != nil {
+		t.Fatalf("NewLocalDirStore: %v", err)
+	}
+	env := setupTestServer(t, ServerConfig{
+		BlobStore:         blobStore,
+		BackupCompression: backup.CompressionGzip,
+	}, engine.Options{})
+
+	resp := doJSONRequest(t, env.server.URL, http.MethodPost, "/v1/databases", env.adminToken, map[string]any{
+		"name": "main",
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 creating database, got %d", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+
+	resp = doJSONRequest(t, env.server.URL, http.MethodPost, "/v1/databases/main/batch", env.adminToken, map[string]any{
+		"statements": []map[string]any{
+			{"sql": "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)"},
+			{"sql": "INSERT INTO items (name) VALUES ('first')"},
+		},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 creating table, got %d", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+
+	// Create a pinned snapshot and an unpinned snapshot
+	var pinnedSnap control.SnapshotRecord
+	resp = doJSONRequest(t, env.server.URL, http.MethodPost, "/v1/databases/main/snapshots", env.adminToken, map[string]any{
+		"label":  "golden",
+		"pinned": true,
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 creating pinned snapshot, got %d", resp.StatusCode)
+	}
+	decodeBody(t, resp, &pinnedSnap)
+	if !pinnedSnap.Pinned || pinnedSnap.SHA256 == "" || pinnedSnap.RelPath == "" {
+		t.Fatalf("unexpected pinned snapshot fields: %+v", pinnedSnap)
+	}
+
+	// Refuses deleting a pinned snapshot with 409 SNAPSHOT_PROTECTED
+	resp = doJSONRequest(t, env.server.URL, http.MethodDelete, "/v1/databases/main/snapshots/"+pinnedSnap.ID, env.adminToken, nil)
+	assertProblemCode(t, resp, http.StatusConflict, CodeSnapshotProtected)
+
+	// Configure backup policy with remote=true
+	var policy control.BackupPolicyRecord
+	resp = doJSONRequest(t, env.server.URL, http.MethodPut, "/v1/databases/main/backup-policy", env.adminToken, map[string]any{
+		"interval_seconds": 3600,
+		"keep_last":        1,
+		"keep_days":        7,
+		"remote":           true,
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 setting backup policy, got %d", resp.StatusCode)
+	}
+	decodeBody(t, resp, &policy)
+	if !policy.Enabled || !policy.Remote || policy.KeepLast != 1 {
+		t.Fatalf("unexpected policy: %+v", policy)
+	}
+
+	// Trigger two backups and verify prune + remote upload
+	for i := 0; i < 2; i++ {
+		resp = doJSONRequest(t, env.server.URL, http.MethodPost, "/v1/databases/main/backups/run", env.adminToken, nil)
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("expected 201 running backup %d, got %d", i, resp.StatusCode)
+		}
+		_ = resp.Body.Close()
+	}
+
+	var status backup.BackupStatus
+	resp = doJSONRequest(t, env.server.URL, http.MethodGet, "/v1/databases/main/backups/status", env.adminToken, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 getting backup status, got %d", resp.StatusCode)
+	}
+	decodeBody(t, resp, &status)
+	if status.LastSuccessAt == nil || status.PendingRemoteCount != 0 {
+		t.Fatalf("expected successful backup with 0 pending remote snapshots, got %+v", status)
+	}
+
+	// Prune dry-run
+	var pruneRes snapshot.PruneResult
+	resp = doJSONRequest(t, env.server.URL, http.MethodPost, "/v1/databases/main/snapshots/prune", env.adminToken, map[string]any{
+		"dry_run": true,
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 pruning snapshots, got %d", resp.StatusCode)
+	}
+	decodeBody(t, resp, &pruneRes)
+
+	// Verify remote backup
+	var verifyRes backup.VerifyResult
+	resp = doJSONRequest(t, env.server.URL, http.MethodPost, "/v1/databases/main/backups/verify", env.adminToken, map[string]any{
+		"remote":        true,
+		"sample_tables": []string{"items"},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 verifying remote backup, got %d", resp.StatusCode)
+	}
+	decodeBody(t, resp, &verifyRes)
+	if !verifyRes.IntegrityOK || !verifyRes.ForeignKeysOK || verifyRes.TableRowCounts["items"] != 1 {
+		t.Fatalf("expected verified remote backup with items=1, got %+v", verifyRes)
+	}
+
+	// Restore from remote as a new database "main_clone"
+	resp = doJSONRequest(t, env.server.URL, http.MethodPost, "/v1/databases/main/restore", env.adminToken, map[string]any{
+		"remote_key": "latest",
+		"as":         "main_clone",
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 restoring from remote as main_clone, got %d", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+
+	// Disable backup policy
+	resp = doJSONRequest(t, env.server.URL, http.MethodDelete, "/v1/databases/main/backup-policy", env.adminToken, nil)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected 204 disabling backup policy, got %d", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
 }
 
 func doJSONRequest(

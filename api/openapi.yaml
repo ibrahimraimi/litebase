@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: Litebase Control Plane & SQLite HTTP API
-  version: 0.0.2-beta
-  description: Developer-first control plane for SQLite with migrations, snapshots, and branching.
+  version: 0.0.3-beta
+  description: Developer-first control plane for SQLite with migrations, snapshots, backups, and branching.
   license:
     name: Apache 2.0
     url: https://www.apache.org/licenses/LICENSE-2.0
@@ -207,12 +207,152 @@ paths:
           required: true
           schema:
             type: string
+        - name: remote
+          in: query
+          required: false
+          schema:
+            type: boolean
       responses:
         "200":
           description: List of snapshots
+  /v1/databases/{db}/snapshots/{id}:
+    delete:
+      summary: Delete a snapshot
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: db
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Snapshot deleted
+        "409":
+          description: Snapshot is pinned or referenced by a branch
+  /v1/databases/{db}/snapshots/prune:
+    post:
+      summary: Apply snapshot retention policy
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: db
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PruneSnapshotsRequest"
+      responses:
+        "200":
+          description: Prune result
+  /v1/databases/{db}/backup-policy:
+    get:
+      summary: Get backup policy for a database
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: db
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Backup policy
+    put:
+      summary: Set or update backup policy for a database
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: db
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BackupPolicyRequest"
+      responses:
+        "200":
+          description: Updated backup policy
+    delete:
+      summary: Disable or delete backup policy for a database
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: db
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Backup policy disabled
+  /v1/databases/{db}/backups/run:
+    post:
+      summary: Trigger an immediate backup run for a database
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: db
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Backup run result
+  /v1/databases/{db}/backups/status:
+    get:
+      summary: Get backup schedule and status for a database
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: db
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Backup status
+  /v1/databases/{db}/backups/verify:
+    post:
+      summary: Run a non-destructive backup restore drill
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: db
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VerifyBackupRequest"
+      responses:
+        "200":
+          description: Backup verification result
   /v1/databases/{db}/restore:
     post:
-      summary: Restore database from a snapshot
+      summary: Restore database from a local or remote snapshot
       security:
         - bearerAuth: []
       parameters:
@@ -461,10 +601,45 @@ components:
           type: boolean
     RestoreRequest:
       type: object
-      required: [snapshot_id]
       properties:
         snapshot_id:
           type: string
+        remote_key:
+          type: string
+        as:
+          type: string
+    PruneSnapshotsRequest:
+      type: object
+      properties:
+        dry_run:
+          type: boolean
+        keep_last:
+          type: integer
+        keep_days:
+          type: integer
+    BackupPolicyRequest:
+      type: object
+      required: [interval_seconds]
+      properties:
+        interval_seconds:
+          type: integer
+        keep_last:
+          type: integer
+        keep_days:
+          type: integer
+        remote:
+          type: boolean
+        enabled:
+          type: boolean
+    VerifyBackupRequest:
+      type: object
+      properties:
+        remote:
+          type: boolean
+        samples:
+          type: array
+          items:
+            type: string
     CreateTokenRequest:
       type: object
       required: [scopes]

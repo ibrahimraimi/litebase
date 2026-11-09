@@ -7,12 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.0.3-beta] - Unreleased
+## [0.0.3-beta] - 2026-11-09
+
+### Added
+
+- Snapshot lifecycle: delete, prune (`--keep-last`, `--keep-days`, `--dry-run`), pin (`--pin`), SHA-256 checksums, and protection for snapshots referenced by active branches (`S5`, `S6`, `F1`).
+- Per-database backup scheduler (`litebase backup policy set|show|disable`, `litebase backup run|status`) with skip-when-idle, jitter, exponential backoff, and concurrency cap (`F2`).
+- Remote backups to S3-compatible object storage (`LITEBASE_S3_*`) or local directory (`LITEBASE_BACKUP_DIR`), with streaming gzip compression (`.sqlite.gz` default, `--backup-compress=none` to disable), `.meta.json` commit markers, orphan cleanup, and `control.db` backups (`F3`).
+- Restore from remote storage (`litebase snapshot restore --from-remote <key|latest>`), restore into a new database (`--as <new-db>`), and control-plane disaster recovery (`litebase restore-control --from-remote <key|latest>`) (`F4`).
+- `litebase backup verify` and `POST /v1/databases/{db}/backups/verify`: non-destructive restore drill (`PRAGMA integrity_check`, `PRAGMA foreign_key_check`, `_litebase_migrations` inspection, and optional `--sample` row counts) (`F5`).
+- Backup and snapshot Prometheus metrics (`litebase_backup_last_success_timestamp_seconds`, `litebase_backup_last_duration_seconds`, `litebase_backup_failures_total`, `litebase_backup_upload_bytes_total`, `litebase_snapshots`, `litebase_snapshot_bytes`) (`F6`).
+
+### Changed
+
+- `snapshots` and `databases` paths are stored relative to `--data-dir` (`rel_path` in `control.db`, `user_version = 1`), so moving `--data-dir` works without rewriting metadata (`S4`).
+- Automatic `pre-restore` and `pre-push` snapshots are capped (`keep_last = 5`, `keep_days = 7`) while `manual` and `branch` snapshots are never auto-pruned (`S5`).
 
 ### Fixed
 
 - Startup recovers databases interrupted mid-restore (`.pre-restore`, `.restore-staging`) and records a `database.restore.recovered` audit event (`S1`).
 - Snapshots write to `.tmp`, run `PRAGMA integrity_check` read-only, fsync the file and parent directory via `engine.AtomicReplace`, and rename into place before recording metadata (`S2`, `S3`).
+
+### Security
+
+- Snapshot and remote restore verify SHA-256 and `PRAGMA integrity_check` in a staging file before closing or replacing any live database (`S6`, `F4`).
+- S3 credentials are read from environment variables only and never stored in `control.db`, `litebase.toml`, logs, or `/metrics`.
 
 ---
 

@@ -13,6 +13,7 @@ import (
 	"github.com/ibrahimraimi/litebase/internal/control"
 	"github.com/ibrahimraimi/litebase/internal/engine"
 	"github.com/ibrahimraimi/litebase/internal/migrate"
+	"github.com/ibrahimraimi/litebase/internal/snapshot"
 )
 
 var sqliteFileMagicHeader = []byte("SQLite format 3\x00")
@@ -23,11 +24,14 @@ type applyMigrationsRequest struct {
 }
 
 type createSnapshotRequest struct {
-	Label string `json:"label"`
+	Label  string `json:"label"`
+	Pinned bool   `json:"pinned"`
 }
 
 type restoreSnapshotRequest struct {
 	SnapshotID string `json:"snapshot_id"`
+	RemoteKey  string `json:"remote_key"`
+	As         string `json:"as"`
 }
 
 type createBranchRequest struct {
@@ -135,7 +139,11 @@ func (s *Server) handleCreateSnapshot(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	snapRec, err := s.snapshots.Create(r.Context(), dbRec.Name, req.Label)
+	snapRec, err := s.snapshots.CreateWithOptions(r.Context(), dbRec.Name, snapshot.CreateOptions{
+		Label:  req.Label,
+		Kind:   control.SnapshotKindManual,
+		Pinned: req.Pinned,
+	})
 	if err != nil {
 		writeMappedError(w, err)
 		return
@@ -144,12 +152,28 @@ func (s *Server) handleCreateSnapshot(w http.ResponseWriter, r *http.Request) {
 		Actor:   principal.ID,
 		Action:  "snapshot.create",
 		Target:  dbRec.Name,
-		Details: map[string]string{"snapshot_id": snapRec.ID, "label": snapRec.Label},
+		Details: map[string]any{"snapshot_id": snapRec.ID, "label": snapRec.Label, "pinned": snapRec.Pinned},
 	})
 	writeJSON(w, http.StatusCreated, snapRec)
 }
 
 func (s *Server) handleListSnapshots(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("remote") == "true" {
+		dbName := r.PathValue("db")
+		principal, _ := principalFromContext(r.Context())
+		if !principal.CanAdmin() {
+			if _, _, ok := s.authorizeDatabaseRead(w, r); !ok {
+				return
+			}
+		}
+		remoteSnaps, err := s.backups.ListRemoteSnapshots(r.Context(), dbName)
+		if err != nil {
+			writeMappedError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"snapshots": remoteSnaps})
+		return
+	}
 	dbRec, _, ok := s.authorizeDatabaseRead(w, r)
 	if !ok {
 		return
@@ -163,8 +187,9 @@ func (s *Server) handleListSnapshots(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRestoreSnapshot(w http.ResponseWriter, r *http.Request) {
-	dbRec, principal, ok := s.authorizeDatabaseWrite(w, r)
-	if !ok {
+	principal, _ := principalFromContext(r.Context())
+	if !principal.CanAdmin() {
+		writeProblem(w, http.StatusForbidden, CodeForbidden, "admin scope is required")
 		return
 	}
 	var req restoreSnapshotRequest
@@ -172,7 +197,32 @@ func (s *Server) handleRestoreSnapshot(w http.ResponseWriter, r *http.Request) {
 		writeMappedError(w, err)
 		return
 	}
-	restored, err := s.snapshots.Restore(r.Context(), dbRec.Name, req.SnapshotID)
+	dbName := r.PathValue("db")
+	if req.RemoteKey != "" {
+		meta, err := s.backups.RestoreFromRemote(r.Context(), dbName, req.RemoteKey, req.As)
+		if err != nil {
+			writeMappedError(w, err)
+			return
+		}
+		_ = s.store.RecordAudit(r.Context(), control.AuditParams{
+			Actor:   principal.ID,
+			Action:  "backup.restore_remote",
+			Target:  dbName,
+			Details: map[string]string{"remote_key": meta.DataKey, "as": req.As},
+		})
+		writeJSON(w, http.StatusOK, map[string]any{"restored_remote": meta})
+		return
+	}
+
+	dbRec, err := s.store.GetDatabaseByName(r.Context(), control.DefaultProjectID, dbName)
+	if err != nil {
+		writeMappedError(w, err)
+		return
+	}
+	restored, err := s.snapshots.RestoreWithOptions(r.Context(), dbRec.Name, snapshot.RestoreOptions{
+		SnapshotID: req.SnapshotID,
+		AsNewDB:    req.As,
+	})
 	if err != nil {
 		writeMappedError(w, err)
 		return
@@ -181,7 +231,7 @@ func (s *Server) handleRestoreSnapshot(w http.ResponseWriter, r *http.Request) {
 		Actor:   principal.ID,
 		Action:  "snapshot.restore",
 		Target:  dbRec.Name,
-		Details: map[string]string{"snapshot_id": restored.ID},
+		Details: map[string]string{"snapshot_id": restored.ID, "as": req.As},
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"restored_snapshot": restored})
 }
@@ -343,11 +393,15 @@ func (s *Server) handleUploadDatabase(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusBadRequest, CodeInvalidRequest, err.Error())
 		return
 	}
-	_, _ = s.snapshots.Create(r.Context(), dbRec.Name, "pre-push")
+	_, _ = s.snapshots.CreateWithOptions(r.Context(), dbRec.Name, snapshot.CreateOptions{
+		Label: "pre-push",
+		Kind:  control.SnapshotKindPrePush,
+	})
 	if err := s.mgr.ReplaceDatabaseFile(r.Context(), dbRec.Name, stagedPath); err != nil {
 		writeMappedError(w, err)
 		return
 	}
+	_, _ = s.snapshots.Prune(r.Context(), dbRec.Name, snapshot.PruneOptions{})
 	updatedRec, err := s.mgr.RefreshDatabaseInfo(r.Context(), dbRec.Name)
 	if err != nil {
 		writeMappedError(w, err)

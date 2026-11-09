@@ -25,6 +25,9 @@ litebase serve \
 | `--data-dir` | `./litebase-data` | Root directory for `control.db`, database files, and snapshots. |
 | `--tls-cert` | `""` | Path to a PEM-encoded TLS certificate file (enables HTTPS when paired with `--tls-key`). |
 | `--tls-key` | `""` | Path to a PEM-encoded TLS private key file. |
+| `--backup-compress` | `gzip` | Remote backup compression mode (`gzip` for `.sqlite.gz` or `none` for uncompressed `.sqlite`). |
+| `--backup-max-concurrent` | `2` | Maximum number of concurrent scheduled backups across databases. |
+| `--delete-orphan-snapshots` | `false` | Delete unreferenced snapshot files on startup (default logs a warning without deleting). |
 
 > [!TIP]
 > If you omit `LITEBASE_BOOTSTRAP_TOKEN` on startup, Litebase automatically generates a fresh random `lbk_...` admin token and prints it once to standard output:
@@ -53,6 +56,19 @@ Litebase separates **project configuration** (committed to Git in `litebase.toml
 |---|---|---|
 | `LITEBASE_BOOTSTRAP_TOKEN` | `litebase serve`, `litebase dev` | Pre-seeds a deterministic `admin`-scoped token on server startup. Must start with `lbk_` and be at least 13 characters long. |
 | `LITEBASE_TOKEN` | All remote CLI commands | Bearer token (`lbk_<hex>`) used by the CLI to authenticate against the remote Litebase server. |
+| `LITEBASE_S3_ENDPOINT` | `litebase serve`, `litebase restore-control` | S3-compatible object storage endpoint (`https://...`). |
+| `LITEBASE_S3_BUCKET` | `litebase serve`, `litebase restore-control` | Target S3 bucket name for remote backups. |
+| `LITEBASE_S3_REGION` | `litebase serve`, `litebase restore-control` | S3 region (defaults to `auto`, compatible with Cloudflare R2, Backblaze B2, and MinIO). |
+| `LITEBASE_S3_PREFIX` | `litebase serve`, `litebase restore-control` | Optional key prefix inside the bucket (defaults to `litebase/`). |
+| `LITEBASE_S3_ACCESS_KEY_ID` | `litebase serve`, `litebase restore-control` | S3 access key ID (read from environment only; never stored on disk). |
+| `LITEBASE_S3_SECRET_ACCESS_KEY` | `litebase serve`, `litebase restore-control` | S3 secret access key (read from environment only; never stored on disk or logged). |
+| `LITEBASE_S3_FORCE_PATH_STYLE` | `litebase serve`, `litebase restore-control` | Set to `true` for path-style S3 endpoints such as MinIO or local object stores. |
+| `LITEBASE_BACKUP_DIR` | `litebase serve`, `litebase restore-control` | Local directory target for remote backups when S3 is not used. |
+
+> [!CAUTION]
+> **Remote Backup Security & `control.db` Privacy**:
+> - S3 credentials are read strictly from environment variables and are never written to `control.db`, `litebase.toml`, audit logs, or `/metrics`.
+> - When remote backups are enabled (`--remote`), Litebase also backs up `control.db` under `<prefix>/_control/` so disaster recovery can restore database metadata, branches, policies, and audit logs. Because `control.db` contains SHA-256 token hashes and audit metadata, **restrict bucket IAM access to the Litebase operator role and enable S3 Server-Side Encryption (`SSE-S3` or `SSE-KMS`) on your bucket**. Client-side backup encryption is planned for a future release.
 
 ### Global CLI Flags
 
@@ -198,7 +214,7 @@ Unauthenticated operational endpoints are exposed at the root path:
 |---|---|---|
 | `GET /healthz` | `200 OK` (`{"status":"ok"}`) | Liveness probe confirming the HTTP process is up. |
 | `GET /readyz` | `200 OK` (`{"status":"ready"}`) | Readiness probe verifying `control.db` can execute queries (`503` on failure). |
-| `GET /metrics` | `200 OK` (`text/plain; version=0.0.4`) | Prometheus metrics (`litebase_queries_total`, `litebase_batches_total`, `litebase_http_requests_total`, `litebase_db_size_bytes`, `litebase_wal_size_bytes`, `litebase_wal_checkpoint_alert`, `litebase_queue_depth`, `litebase_batch_size`, `litebase_commit_latency_seconds_total`). |
+| `GET /metrics` | `200 OK` (`text/plain; version=0.0.4`) | Authenticated Prometheus metrics (`litebase_queries_total`, `litebase_batches_total`, `litebase_http_requests_total`, `litebase_db_size_bytes`, `litebase_wal_size_bytes`, `litebase_wal_checkpoint_alert`, `litebase_queue_depth`, `litebase_batch_size`, `litebase_commit_latency_seconds_total`, `litebase_backup_last_success_timestamp_seconds`, `litebase_backup_last_duration_seconds`, `litebase_backup_failures_total`, `litebase_backup_upload_bytes_total`, `litebase_snapshots`, `litebase_snapshot_bytes`). |
 
 ### Graceful Shutdown
 

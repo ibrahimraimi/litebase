@@ -15,6 +15,7 @@ import (
 
 	"github.com/ibrahimraimi/litebase/internal/api"
 	"github.com/ibrahimraimi/litebase/internal/auth"
+	"github.com/ibrahimraimi/litebase/internal/backup"
 	"github.com/ibrahimraimi/litebase/internal/control"
 	"github.com/ibrahimraimi/litebase/internal/engine"
 	"github.com/ibrahimraimi/litebase/internal/manager"
@@ -22,11 +23,14 @@ import (
 )
 
 type serveOptions struct {
-	addr    string
-	dataDir string
-	tlsCert string
-	tlsKey  string
-	isDev   bool
+	addr                  string
+	dataDir               string
+	tlsCert               string
+	tlsKey                string
+	backupCompress        string
+	backupMaxConcurrent   int
+	deleteOrphanSnapshots bool
+	isDev                 bool
 }
 
 func newServeCommand() *cobra.Command {
@@ -42,6 +46,9 @@ func newServeCommand() *cobra.Command {
 	cmd.Flags().StringVar(&opts.dataDir, "data-dir", "./litebase-data", "Data directory for control.db and databases")
 	cmd.Flags().StringVar(&opts.tlsCert, "tls-cert", "", "Path to TLS certificate file")
 	cmd.Flags().StringVar(&opts.tlsKey, "tls-key", "", "Path to TLS private key file")
+	cmd.Flags().StringVar(&opts.backupCompress, "backup-compress", string(backup.CompressionGzip), "Remote backup compression mode (gzip|none)")
+	cmd.Flags().IntVar(&opts.backupMaxConcurrent, "backup-max-concurrent", backup.DefaultSchedulerMaxConcurrent, "Maximum concurrent scheduled backups")
+	cmd.Flags().BoolVar(&opts.deleteOrphanSnapshots, "delete-orphan-snapshots", false, "Delete unreferenced snapshot files on startup")
 	return cmd
 }
 
@@ -73,9 +80,12 @@ func runServerProcess(cmd *cobra.Command, opts serveOptions) error {
 	}
 	defer store.Close()
 
+	logger := slog.New(slog.NewJSONHandler(cmd.ErrOrStderr(), nil))
 	mgr, err := manager.NewManager(manager.Config{
-		DataDir: opts.dataDir,
-		Store:   store,
+		DataDir:               opts.dataDir,
+		Store:                 store,
+		Logger:                logger,
+		DeleteOrphanSnapshots: opts.deleteOrphanSnapshots,
 	})
 	if err != nil {
 		return err
@@ -92,8 +102,12 @@ func runServerProcess(cmd *cobra.Command, opts serveOptions) error {
 		fmt.Fprintf(cmd.OutOrStdout(), "Bootstrap admin token (shown once): %s\n", tokenPlaintext)
 	}
 
-	logger := slog.New(slog.NewJSONHandler(cmd.ErrOrStderr(), nil))
-	apiServer := api.NewServer(mgr, api.ServerConfig{Logger: logger})
+	apiServer := api.NewServer(mgr, api.ServerConfig{
+		Logger:            logger,
+		BackupCompression: backup.CompressionMode(opts.backupCompress),
+		BackupMaxConc:     opts.backupMaxConcurrent,
+	})
+	apiServer.Scheduler().Start(ctx)
 	httpServer := &http.Server{
 		Addr:              opts.addr,
 		Handler:           apiServer.Handler(),

@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -136,5 +137,60 @@ func TestTokenCacheInvalidationAndAdminCheck(t *testing.T) {
 	}
 	if _, err := store.AuthenticateToken(ctx, plaintext); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected revoked token to fail immediately despite cache, got: %v", err)
+	}
+}
+
+func TestUpgradeFrom002SchemaBackfillsRelPathAndKind(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	controlPath := filepath.Join(dataDir, "control.db")
+
+	rawDB, err := sql.Open("sqlite3", controlPath)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	v002DDL := `
+	CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL);
+	CREATE TABLE databases (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, path TEXT NOT NULL, durability TEXT NOT NULL, size_bytes INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, deleted_at TEXT);
+	CREATE TABLE snapshots (id TEXT PRIMARY KEY, database_id TEXT NOT NULL, path TEXT NOT NULL, size_bytes INTEGER NOT NULL, created_at TEXT NOT NULL, label TEXT NOT NULL);
+	INSERT INTO projects (id, name, created_at) VALUES ('proj_default', 'default', '2026-10-29T00:00:00Z');
+	INSERT INTO databases (id, project_id, name, path, durability, size_bytes, created_at) VALUES ('db_1', 'proj_default', 'main', '/old/root/databases/default/main/main.sqlite', 'normal', 4096, '2026-10-29T00:00:00Z');
+	INSERT INTO snapshots (id, database_id, path, size_bytes, created_at, label) VALUES
+		('snap_1', 'db_1', '/old/root/snapshots/main/100-manual.sqlite', 4096, '2026-10-29T01:00:00Z', 'manual'),
+		('snap_2', 'db_1', '/old/root/snapshots/main/200-pre-restore.sqlite', 4096, '2026-10-29T02:00:00Z', 'pre-restore'),
+		('snap_3', 'db_1', '/old/root/snapshots/main/300-branch-dev.sqlite', 4096, '2026-10-29T03:00:00Z', 'branch-dev');
+	`
+	if _, err := rawDB.ExecContext(ctx, v002DDL); err != nil {
+		t.Fatalf("seed 0.0.2 schema: %v", err)
+	}
+	_ = rawDB.Close()
+
+	store, err := OpenStore(ctx, controlPath)
+	if err != nil {
+		t.Fatalf("OpenStore upgrade from 0.0.2: %v", err)
+	}
+	defer store.Close()
+
+	snaps, err := store.ListSnapshotRecords(ctx, "db_1")
+	if err != nil || len(snaps) != 3 {
+		t.Fatalf("ListSnapshotRecords after upgrade: len=%d err=%v", len(snaps), err)
+	}
+	byID := make(map[string]SnapshotRecord, len(snaps))
+	for _, s := range snaps {
+		byID[s.ID] = s
+	}
+
+	if byID["snap_1"].RelPath != "snapshots/main/100-manual.sqlite" || byID["snap_1"].Kind != SnapshotKindManual {
+		t.Fatalf("unexpected snap_1 migration: %+v", byID["snap_1"])
+	}
+	if byID["snap_2"].RelPath != "snapshots/main/200-pre-restore.sqlite" || byID["snap_2"].Kind != SnapshotKindPreRestore {
+		t.Fatalf("unexpected snap_2 migration: %+v", byID["snap_2"])
+	}
+	if byID["snap_3"].RelPath != "snapshots/main/300-branch-dev.sqlite" || byID["snap_3"].Kind != SnapshotKindBranch {
+		t.Fatalf("unexpected snap_3 migration: %+v", byID["snap_3"])
+	}
+	expectedResolved := filepath.Join(dataDir, "snapshots", "main", "100-manual.sqlite")
+	if byID["snap_1"].Path != expectedResolved {
+		t.Fatalf("expected resolved Path %q, got %q", expectedResolved, byID["snap_1"].Path)
 	}
 }
