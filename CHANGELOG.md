@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.0.3-beta] - Unreleased
+
+### Fixed
+
+- Startup recovers databases interrupted mid-restore (`.pre-restore`, `.restore-staging`) and records a `database.restore.recovered` audit event (`S1`).
+- Snapshots write to `.tmp`, run `PRAGMA integrity_check` read-only, fsync the file and parent directory via `engine.AtomicReplace`, and rename into place before recording metadata (`S2`, `S3`).
+
+---
+
 ## [0.0.2-beta] - 2026-10-29
 
 ### Changed

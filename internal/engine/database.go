@@ -220,6 +220,23 @@ func (db *Database) IntegrityCheck(ctx context.Context) error {
 	return nil
 }
 
+func CheckFileIntegrity(ctx context.Context, dbPath string) error {
+	readerPool, err := NewSQLiteEngine().OpenReaderPool(dbPath, Options{ReaderPoolMax: 1})
+	if err != nil {
+		return fmt.Errorf("open file %q for integrity_check: %w", dbPath, err)
+	}
+	defer readerPool.Close()
+
+	var status string
+	if err := readerPool.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&status); err != nil {
+		return fmt.Errorf("run integrity_check on %q: %w", dbPath, err)
+	}
+	if !strings.EqualFold(status, "ok") {
+		return fmt.Errorf("integrity_check failed for %q: %s", dbPath, status)
+	}
+	return nil
+}
+
 func (db *Database) Close(ctx context.Context) error {
 	if db.isClosed.Swap(true) {
 		return nil

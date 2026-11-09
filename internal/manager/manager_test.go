@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/ibrahimraimi/litebase/internal/control"
 	"github.com/ibrahimraimi/litebase/internal/engine"
+	"github.com/ibrahimraimi/litebase/internal/testhook"
 )
 
 func TestManagerLifecycleAndIdleEviction(t *testing.T) {
@@ -164,5 +166,180 @@ func TestSafeRestoreDrainRollbackAndConcurrency(t *testing.T) {
 	val2, _ := out2.Rows[0][0].ToDriverValue()
 	if val2.(int64) != 0 {
 		t.Fatalf("expected 0 rows after restoring snap.sqlite, got %d", val2.(int64))
+	}
+}
+
+const (
+	restoreCrashHelperEnv = "LITEBASE_RESTORE_CRASH_HELPER"
+	restoreDataDirEnv     = "LITEBASE_RESTORE_DATA_DIR"
+	restoreSnapPathEnv    = "LITEBASE_RESTORE_SNAP_PATH"
+)
+
+func TestRestoreCrashSubprocessHelper(t *testing.T) {
+	if os.Getenv(restoreCrashHelperEnv) != "1" {
+		return
+	}
+	ctx := context.Background()
+	dataDir := os.Getenv(restoreDataDirEnv)
+	snapPath := os.Getenv(restoreSnapPathEnv)
+
+	store, err := control.OpenStore(ctx, filepath.Join(dataDir, "control.db"))
+	if err != nil {
+		os.Exit(2)
+	}
+	defer store.Close()
+
+	mgr, err := NewManager(Config{DataDir: dataDir, Store: store})
+	if err != nil {
+		os.Exit(3)
+	}
+	_ = mgr.ReplaceDatabaseFile(ctx, "main", snapPath)
+	os.Exit(0)
+}
+
+func TestRestoreCrashRecoveryOnStartup(t *testing.T) {
+	failpoints := []string{
+		"restore.during-staging",
+		"restore.after-rename",
+		"restore.after-wal-remove",
+	}
+	for _, fp := range failpoints {
+		t.Run(fp, func(t *testing.T) {
+			runRestoreCrashRecoveryCase(t, fp)
+		})
+	}
+}
+
+func runRestoreCrashRecoveryCase(t *testing.T, failpoint string) {
+	t.Helper()
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	snapPath := seedDatabaseAndEmptySnapshot(t, ctx, dataDir)
+
+	testBinary, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve executable: %v", err)
+	}
+	cmd := exec.Command(testBinary, "-test.run=^TestRestoreCrashSubprocessHelper$")
+	cmd.Env = append(os.Environ(),
+		restoreCrashHelperEnv+"=1",
+		restoreDataDirEnv+"="+dataDir,
+		restoreSnapPathEnv+"="+snapPath,
+		testhook.FailpointEnvVar+"="+failpoint,
+	)
+	_ = cmd.Run()
+
+	store, err := control.OpenStore(ctx, filepath.Join(dataDir, "control.db"))
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer store.Close()
+
+	mgr, err := NewManager(Config{DataDir: dataDir, Store: store})
+	if err != nil {
+		t.Fatalf("NewManager after crash (%s): %v", failpoint, err)
+	}
+	defer mgr.CloseAll(ctx)
+
+	rec, err := store.GetDatabaseByName(ctx, control.DefaultProjectID, "main")
+	if err != nil {
+		t.Fatalf("GetDatabaseByName: %v", err)
+	}
+	if _, statErr := os.Stat(rec.Path + ".restore-staging"); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected .restore-staging to be removed on startup recovery after %s", failpoint)
+	}
+	if failpoint != "restore.during-staging" {
+		auditCount, err := store.CountAuditEvents(ctx, "database.restore.recovered", "main")
+		if err != nil || auditCount != 1 {
+			t.Fatalf("expected 1 database.restore.recovered audit event after %s, got %d (err=%v)", failpoint, auditCount, err)
+		}
+	}
+
+	entry, err := mgr.Acquire(ctx, "main")
+	if err != nil {
+		t.Fatalf("Acquire main after recovery (%s): %v", failpoint, err)
+	}
+	defer mgr.Release(entry)
+
+	if err := entry.DB.IntegrityCheck(ctx); err != nil {
+		t.Fatalf("IntegrityCheck after recovery (%s): %v", failpoint, err)
+	}
+	out, err := entry.DB.ExecuteReadOnly(ctx, engine.Statement{SQL: "SELECT COUNT(*) FROM items"})
+	if err != nil {
+		t.Fatalf("query items after recovery (%s): %v", failpoint, err)
+	}
+	val, _ := out.Rows[0][0].ToDriverValue()
+	if val.(int64) != 2 {
+		t.Fatalf("expected original 2 rows in items after interrupted restore (%s), got %d", failpoint, val.(int64))
+	}
+}
+
+func seedDatabaseAndEmptySnapshot(t *testing.T, ctx context.Context, dataDir string) string {
+	t.Helper()
+	store, err := control.OpenStore(ctx, filepath.Join(dataDir, "control.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+
+	mgr, err := NewManager(Config{DataDir: dataDir, Store: store})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	defer mgr.CloseAll(ctx)
+
+	if _, err := mgr.CreateDatabase(ctx, "main", engine.DurabilityFull); err != nil {
+		t.Fatalf("CreateDatabase: %v", err)
+	}
+	entry, err := mgr.Acquire(ctx, "main")
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	if _, err := entry.DB.Execute(ctx, engine.Statement{SQL: "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)"}); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	snapPath := filepath.Join(dataDir, "empty-snap.sqlite")
+	if err := entry.DB.VacuumInto(ctx, snapPath); err != nil {
+		t.Fatalf("VacuumInto: %v", err)
+	}
+	if _, err := entry.DB.Execute(ctx, engine.Statement{SQL: "INSERT INTO items (name) VALUES ('one'), ('two')"}); err != nil {
+		t.Fatalf("insert items: %v", err)
+	}
+	mgr.Release(entry)
+	return snapPath
+}
+
+func TestStartupPreservesCompletedPreRestoreSafetyCopy(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	snapPath := seedDatabaseAndEmptySnapshot(t, ctx, dataDir)
+
+	store, err := control.OpenStore(ctx, filepath.Join(dataDir, "control.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+
+	mgr, err := NewManager(Config{DataDir: dataDir, Store: store})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := mgr.ReplaceDatabaseFile(ctx, "main", snapPath); err != nil {
+		t.Fatalf("ReplaceDatabaseFile: %v", err)
+	}
+	_ = mgr.CloseAll(ctx)
+
+	rec, err := store.GetDatabaseByName(ctx, control.DefaultProjectID, "main")
+	if err != nil {
+		t.Fatalf("GetDatabaseByName: %v", err)
+	}
+	mgrRestarted, err := NewManager(Config{DataDir: dataDir, Store: store})
+	if err != nil {
+		t.Fatalf("NewManager restart: %v", err)
+	}
+	defer mgrRestarted.CloseAll(ctx)
+
+	if _, err := os.Stat(rec.Path + ".pre-restore"); err != nil {
+		t.Fatalf("expected .pre-restore safety copy to be preserved when main db exists: %v", err)
 	}
 }

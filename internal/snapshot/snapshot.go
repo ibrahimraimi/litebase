@@ -9,6 +9,7 @@ import (
 	"github.com/ibrahimraimi/litebase/internal/control"
 	"github.com/ibrahimraimi/litebase/internal/engine"
 	"github.com/ibrahimraimi/litebase/internal/manager"
+	"github.com/ibrahimraimi/litebase/internal/testhook"
 )
 
 type Service struct {
@@ -43,12 +44,18 @@ func (s *Service) Create(
 	if err != nil {
 		return control.SnapshotRecord{}, err
 	}
-	if err := entry.DB.VacuumInto(ctx, destPath); err != nil {
+	tmpPath := destPath + ".tmp"
+	_ = os.Remove(tmpPath)
+	if err := entry.DB.VacuumInto(ctx, tmpPath); err != nil {
+		_ = os.Remove(tmpPath)
 		return control.SnapshotRecord{}, err
 	}
-	var sizeBytes int64
-	if info, statErr := os.Stat(destPath); statErr == nil {
-		sizeBytes = info.Size()
+	testhook.At("snapshot.during-vacuum")
+
+	sizeBytes, err := verifyAndPromoteSnapshotTempFile(ctx, tmpPath, destPath)
+	if err != nil {
+		_ = os.Remove(tmpPath)
+		return control.SnapshotRecord{}, err
 	}
 	return s.mgr.Store().CreateSnapshotRecord(ctx, control.CreateSnapshotParams{
 		DatabaseID:   entry.Record.ID,
@@ -56,6 +63,23 @@ func (s *Service) Create(
 		SizeBytes:    sizeBytes,
 		Label:        cleanLabel,
 	})
+}
+
+func verifyAndPromoteSnapshotTempFile(ctx context.Context, tmpPath string, destPath string) (int64, error) {
+	if err := engine.SyncFileOnDisk(tmpPath); err != nil {
+		return 0, fmt.Errorf("fsync temporary snapshot %q: %w", tmpPath, err)
+	}
+	if err := engine.CheckFileIntegrity(ctx, tmpPath); err != nil {
+		return 0, err
+	}
+	_, sizeBytes, err := engine.ComputeFileSHA256(tmpPath)
+	if err != nil {
+		return 0, fmt.Errorf("hash temporary snapshot %q: %w", tmpPath, err)
+	}
+	if err := engine.AtomicReplace(tmpPath, destPath); err != nil {
+		return 0, fmt.Errorf("promote snapshot %q into place: %w", destPath, err)
+	}
+	return sizeBytes, nil
 }
 
 func (s *Service) List(ctx context.Context, dbName string) ([]control.SnapshotRecord, error) {

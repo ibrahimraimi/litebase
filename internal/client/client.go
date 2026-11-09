@@ -438,7 +438,7 @@ func writeStreamAtomically(destinationPath string, reader io.Reader) (int64, err
 	}
 	_ = os.Remove(destinationPath + "-wal")
 	_ = os.Remove(destinationPath + "-shm")
-	if err := os.Rename(stagingPath, destinationPath); err != nil {
+	if err := engine.AtomicReplace(stagingPath, destinationPath); err != nil {
 		_ = os.Remove(stagingPath)
 		return 0, err
 	}
