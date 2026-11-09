@@ -15,9 +15,11 @@ import (
 
 	"github.com/ibrahimraimi/litebase/internal/api"
 	"github.com/ibrahimraimi/litebase/internal/auth"
+	"github.com/ibrahimraimi/litebase/internal/backup"
 	"github.com/ibrahimraimi/litebase/internal/control"
 	"github.com/ibrahimraimi/litebase/internal/engine"
 	"github.com/ibrahimraimi/litebase/internal/migrate"
+	"github.com/ibrahimraimi/litebase/internal/snapshot"
 )
 
 type Client struct {
@@ -194,11 +196,20 @@ func (c *Client) CreateSnapshot(
 	dbName string,
 	label string,
 ) (control.SnapshotRecord, error) {
+	return c.CreateSnapshotWithOptions(ctx, dbName, label, false)
+}
+
+func (c *Client) CreateSnapshotWithOptions(
+	ctx context.Context,
+	dbName string,
+	label string,
+	pinned bool,
+) (control.SnapshotRecord, error) {
 	var rec control.SnapshotRecord
 	err := c.doJSON(ctx, requestOptions{
 		method:         http.MethodPost,
 		path:           fmt.Sprintf("/v1/databases/%s/snapshots", url.PathEscape(dbName)),
-		requestBody:    map[string]string{"label": label},
+		requestBody:    map[string]any{"label": label, "pinned": pinned},
 		responseTarget: &rec,
 	})
 	return rec, err
@@ -216,21 +227,153 @@ func (c *Client) ListSnapshots(ctx context.Context, dbName string) ([]control.Sn
 	return wrapper.Snapshots, err
 }
 
+func (c *Client) ListRemoteSnapshots(ctx context.Context, dbName string) ([]backup.RemoteSnapshotMeta, error) {
+	var wrapper struct {
+		Snapshots []backup.RemoteSnapshotMeta `json:"snapshots"`
+	}
+	err := c.doJSON(ctx, requestOptions{
+		method:         http.MethodGet,
+		path:           fmt.Sprintf("/v1/databases/%s/snapshots?remote=true", url.PathEscape(dbName)),
+		responseTarget: &wrapper,
+	})
+	return wrapper.Snapshots, err
+}
+
+func (c *Client) DeleteSnapshot(ctx context.Context, dbName string, snapshotID string) error {
+	return c.doJSON(ctx, requestOptions{
+		method: http.MethodDelete,
+		path:   fmt.Sprintf("/v1/databases/%s/snapshots/%s", url.PathEscape(dbName), url.PathEscape(snapshotID)),
+	})
+}
+
+func (c *Client) PruneSnapshots(ctx context.Context, dbName string, dryRun bool) (snapshot.PruneResult, error) {
+	var out snapshot.PruneResult
+	err := c.doJSON(ctx, requestOptions{
+		method:         http.MethodPost,
+		path:           fmt.Sprintf("/v1/databases/%s/snapshots/prune", url.PathEscape(dbName)),
+		requestBody:    map[string]bool{"dry_run": dryRun},
+		responseTarget: &out,
+	})
+	return out, err
+}
+
+type RestoreSnapshotParams struct {
+	SnapshotID string `json:"snapshot_id,omitempty"`
+	RemoteKey  string `json:"remote_key,omitempty"`
+	As         string `json:"as,omitempty"`
+}
+
+type RestoreSnapshotResponse struct {
+	RestoredSnapshot *control.SnapshotRecord    `json:"restored_snapshot,omitempty"`
+	RestoredRemote   *backup.RemoteSnapshotMeta `json:"restored_remote,omitempty"`
+}
+
 func (c *Client) RestoreSnapshot(
 	ctx context.Context,
 	dbName string,
 	snapshotID string,
 ) (control.SnapshotRecord, error) {
-	var wrapper struct {
-		Restored control.SnapshotRecord `json:"restored_snapshot"`
+	res, err := c.RestoreSnapshotWithOptions(ctx, dbName, RestoreSnapshotParams{
+		SnapshotID: snapshotID,
+	})
+	if err != nil || res.RestoredSnapshot == nil {
+		return control.SnapshotRecord{}, err
 	}
+	return *res.RestoredSnapshot, nil
+}
+
+func (c *Client) RestoreSnapshotWithOptions(
+	ctx context.Context,
+	dbName string,
+	params RestoreSnapshotParams,
+) (RestoreSnapshotResponse, error) {
+	var out RestoreSnapshotResponse
 	err := c.doJSON(ctx, requestOptions{
 		method:         http.MethodPost,
 		path:           fmt.Sprintf("/v1/databases/%s/restore", url.PathEscape(dbName)),
-		requestBody:    map[string]string{"snapshot_id": snapshotID},
-		responseTarget: &wrapper,
+		requestBody:    params,
+		responseTarget: &out,
 	})
-	return wrapper.Restored, err
+	return out, err
+}
+
+type BackupPolicyParams struct {
+	IntervalSeconds int64 `json:"interval_seconds"`
+	KeepLast        int   `json:"keep_last"`
+	KeepDays        int   `json:"keep_days"`
+	Remote          bool  `json:"remote"`
+}
+
+func (c *Client) SetBackupPolicy(
+	ctx context.Context,
+	dbName string,
+	params BackupPolicyParams,
+) (control.BackupPolicyRecord, error) {
+	var out control.BackupPolicyRecord
+	err := c.doJSON(ctx, requestOptions{
+		method:         http.MethodPut,
+		path:           fmt.Sprintf("/v1/databases/%s/backup-policy", url.PathEscape(dbName)),
+		requestBody:    params,
+		responseTarget: &out,
+	})
+	return out, err
+}
+
+func (c *Client) GetBackupPolicy(ctx context.Context, dbName string) (control.BackupPolicyRecord, error) {
+	var out control.BackupPolicyRecord
+	err := c.doJSON(ctx, requestOptions{
+		method:         http.MethodGet,
+		path:           fmt.Sprintf("/v1/databases/%s/backup-policy", url.PathEscape(dbName)),
+		responseTarget: &out,
+	})
+	return out, err
+}
+
+func (c *Client) DisableBackupPolicy(ctx context.Context, dbName string) error {
+	return c.doJSON(ctx, requestOptions{
+		method: http.MethodDelete,
+		path:   fmt.Sprintf("/v1/databases/%s/backup-policy", url.PathEscape(dbName)),
+	})
+}
+
+func (c *Client) RunBackup(ctx context.Context, dbName string) (backup.BackupRunResult, error) {
+	var out backup.BackupRunResult
+	err := c.doJSON(ctx, requestOptions{
+		method:         http.MethodPost,
+		path:           fmt.Sprintf("/v1/databases/%s/backups/run", url.PathEscape(dbName)),
+		responseTarget: &out,
+	})
+	return out, err
+}
+
+func (c *Client) GetBackupStatus(ctx context.Context, dbName string) (backup.BackupStatus, error) {
+	var out backup.BackupStatus
+	err := c.doJSON(ctx, requestOptions{
+		method:         http.MethodGet,
+		path:           fmt.Sprintf("/v1/databases/%s/backups/status", url.PathEscape(dbName)),
+		responseTarget: &out,
+	})
+	return out, err
+}
+
+type VerifyBackupParams struct {
+	Remote       bool     `json:"remote"`
+	SampleTables []string `json:"sample_tables,omitempty"`
+}
+
+func (c *Client) VerifyBackup(
+	ctx context.Context,
+	dbName string,
+	params VerifyBackupParams,
+) (backup.VerifyResult, error) {
+	var out backup.VerifyResult
+	err := c.doJSON(ctx, requestOptions{
+		method:         http.MethodPost,
+		path:           fmt.Sprintf("/v1/databases/%s/backups/verify", url.PathEscape(dbName)),
+		requestBody:    params,
+		responseTarget: &out,
+	})
+	return out, err
 }
 
 func (c *Client) CreateBranch(

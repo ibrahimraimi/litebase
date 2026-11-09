@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,6 +36,8 @@ type cachedTokenEntry struct {
 
 type Store struct {
 	db          *sql.DB
+	controlPath string
+	dataDir     string
 	cacheMu     sync.RWMutex
 	tokenCache  map[string]cachedTokenEntry
 	lastUsed    map[string]time.Time
@@ -42,13 +45,15 @@ type Store struct {
 }
 
 func OpenStore(ctx context.Context, controlDBPath string) (*Store, error) {
-	if err := os.MkdirAll(filepath.Dir(controlDBPath), 0o750); err != nil {
+	cleanControlPath := filepath.Clean(controlDBPath)
+	dataDir := filepath.Dir(cleanControlPath)
+	if err := os.MkdirAll(dataDir, 0o750); err != nil {
 		return nil, fmt.Errorf("create control db directory: %w", err)
 	}
-	dsn := fmt.Sprintf("file:%s?_journal_mode=WAL&_synchronous=NORMAL&_foreign_keys=on&_busy_timeout=5000&_txlock=immediate", controlDBPath)
+	dsn := fmt.Sprintf("file:%s?_journal_mode=WAL&_synchronous=NORMAL&_foreign_keys=on&_busy_timeout=5000&_txlock=immediate", cleanControlPath)
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("open control db %q: %w", controlDBPath, err)
+		return nil, fmt.Errorf("open control db %q: %w", cleanControlPath, err)
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
@@ -56,6 +61,8 @@ func OpenStore(ctx context.Context, controlDBPath string) (*Store, error) {
 
 	store := &Store{
 		db:          db,
+		controlPath: cleanControlPath,
+		dataDir:     dataDir,
 		tokenCache:  make(map[string]cachedTokenEntry),
 		lastUsed:    make(map[string]time.Time),
 		lastFlushAt: time.Now().UTC(),
@@ -65,6 +72,14 @@ func OpenStore(ctx context.Context, controlDBPath string) (*Store, error) {
 		return nil, err
 	}
 	return store, nil
+}
+
+func (s *Store) ControlPath() string {
+	return s.controlPath
+}
+
+func (s *Store) DataDir() string {
+	return s.dataDir
 }
 
 func (s *Store) Ping(ctx context.Context) error {
@@ -82,14 +97,145 @@ func (s *Store) migrateSchema(ctx context.Context) error {
 			return fmt.Errorf("migrate control schema: %w", err)
 		}
 	}
-	_, err := s.db.ExecContext(
+	if _, err := s.db.ExecContext(
 		ctx,
 		`INSERT OR IGNORE INTO projects (id, name, created_at) VALUES (?, ?, ?)`,
 		DefaultProjectID,
 		DefaultProjectName,
 		time.Now().UTC().Format(time.RFC3339Nano),
-	)
+	); err != nil {
+		return err
+	}
+	return s.migrateToV1(ctx)
+}
+
+func (s *Store) migrateToV1(ctx context.Context) error {
+	existingCols, err := s.listTableColumns(ctx, "snapshots")
+	if err != nil {
+		return err
+	}
+	alterCols := []struct {
+		name string
+		ddl  string
+	}{
+		{"rel_path", "ALTER TABLE snapshots ADD COLUMN rel_path TEXT"},
+		{"sha256", "ALTER TABLE snapshots ADD COLUMN sha256 TEXT"},
+		{"kind", "ALTER TABLE snapshots ADD COLUMN kind TEXT NOT NULL DEFAULT 'manual'"},
+		{"pinned", "ALTER TABLE snapshots ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0"},
+		{"remote_key", "ALTER TABLE snapshots ADD COLUMN remote_key TEXT"},
+		{"remote_status", "ALTER TABLE snapshots ADD COLUMN remote_status TEXT NOT NULL DEFAULT 'none'"},
+		{"remote_uploaded_at", "ALTER TABLE snapshots ADD COLUMN remote_uploaded_at TEXT"},
+	}
+	for _, col := range alterCols {
+		if _, exists := existingCols[col.name]; !exists {
+			if _, err := s.db.ExecContext(ctx, col.ddl); err != nil {
+				return fmt.Errorf("alter snapshots table (%s): %w", col.name, err)
+			}
+		}
+	}
+	if err := s.backfillLegacySnapshots(ctx); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, "PRAGMA user_version = 1")
 	return err
+}
+
+func (s *Store) listTableColumns(ctx context.Context, tableName string) (map[string]struct{}, error) {
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", tableName))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	cols := make(map[string]struct{})
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, colType string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+			return nil, err
+		}
+		cols[name] = struct{}{}
+	}
+	return cols, rows.Err()
+}
+
+func (s *Store) backfillLegacySnapshots(ctx context.Context) error {
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT id, path, label FROM snapshots WHERE rel_path IS NULL OR rel_path = ''`,
+	)
+	if err != nil {
+		return err
+	}
+	type legacyRow struct {
+		id    string
+		path  string
+		label string
+	}
+	var pending []legacyRow
+	for rows.Next() {
+		var r legacyRow
+		if err := rows.Scan(&r.id, &r.path, &r.label); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		pending = append(pending, r)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, r := range pending {
+		relPath := extractRelativePathInDataDir(s.dataDir, r.path, "snapshots")
+		kind := InferSnapshotKind(r.label)
+		if _, err := s.db.ExecContext(
+			ctx,
+			`UPDATE snapshots SET rel_path = ?, kind = ? WHERE id = ?`,
+			relPath,
+			kind,
+			r.id,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func InferSnapshotKind(label string) string {
+	switch {
+	case label == "pre-restore":
+		return "pre-restore"
+	case label == "pre-push":
+		return "pre-push"
+	case label == "scheduled":
+		return "scheduled"
+	case strings.HasPrefix(label, "branch-"):
+		return "branch"
+	default:
+		return "manual"
+	}
+}
+
+func extractRelativePathInDataDir(dataDir string, storedPath string, markerDir string) string {
+	cleanStored := filepath.Clean(storedPath)
+	if !filepath.IsAbs(cleanStored) {
+		return filepath.ToSlash(cleanStored)
+	}
+	if dataDir != "" {
+		if rel, err := filepath.Rel(filepath.Clean(dataDir), cleanStored); err == nil && !strings.HasPrefix(rel, "..") {
+			return filepath.ToSlash(rel)
+		}
+	}
+	slashPath := filepath.ToSlash(cleanStored)
+	needle := "/" + markerDir + "/"
+	if idx := strings.LastIndex(slashPath, needle); idx >= 0 {
+		return slashPath[idx+1:]
+	}
+	return ""
 }
 
 func NewSortableID(prefix string) (string, error) {
@@ -172,5 +318,17 @@ var controlSchemaStatements = []string{
 		action TEXT NOT NULL,
 		target TEXT NOT NULL,
 		detail_json TEXT NOT NULL
+	)`,
+	`CREATE TABLE IF NOT EXISTS backup_policies (
+		database_id TEXT PRIMARY KEY REFERENCES databases(id),
+		interval_seconds INTEGER NOT NULL,
+		keep_last INTEGER NOT NULL DEFAULT 24,
+		keep_days INTEGER NOT NULL DEFAULT 14,
+		remote INTEGER NOT NULL DEFAULT 0,
+		enabled INTEGER NOT NULL DEFAULT 1,
+		last_run_at TEXT,
+		last_success_at TEXT,
+		last_error TEXT,
+		created_at TEXT NOT NULL
 	)`,
 }

@@ -57,6 +57,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		s.appendDatabaseMetrics(&builder, dbMetrics)
 	}
+	s.appendBackupMetrics(r, &builder)
 
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(builder.String()))
@@ -118,5 +119,40 @@ func (s *Server) appendDatabaseMetrics(builder *strings.Builder, dbMetrics []man
 		fmt.Fprintf(builder, "litebase_batch_size{db=%q} %d\n", dm.Name, dm.Writer.LastBatchSize)
 		commitSeconds := float64(dm.Writer.TotalCommitDurationNS) / 1e9
 		fmt.Fprintf(builder, "litebase_commit_latency_seconds_total{db=%q} %.6f\n", dm.Name, commitSeconds)
+	}
+}
+
+func (s *Server) appendBackupMetrics(r *http.Request, builder *strings.Builder) {
+	builder.WriteString("# HELP litebase_backup_last_success_timestamp_seconds Unix timestamp of the last successful backup.\n")
+	builder.WriteString("# TYPE litebase_backup_last_success_timestamp_seconds gauge\n")
+	builder.WriteString("# HELP litebase_backup_last_duration_seconds Duration of the last backup run in seconds.\n")
+	builder.WriteString("# TYPE litebase_backup_last_duration_seconds gauge\n")
+	builder.WriteString("# HELP litebase_backup_failures_total Total backup failures per database.\n")
+	builder.WriteString("# TYPE litebase_backup_failures_total counter\n")
+	builder.WriteString("# HELP litebase_backup_upload_bytes_total Total bytes uploaded to remote backup storage.\n")
+	builder.WriteString("# TYPE litebase_backup_upload_bytes_total counter\n")
+	builder.WriteString("# HELP litebase_snapshots Total local snapshots per database and kind.\n")
+	builder.WriteString("# TYPE litebase_snapshots gauge\n")
+	builder.WriteString("# HELP litebase_snapshot_bytes Total local snapshot bytes per database.\n")
+	builder.WriteString("# TYPE litebase_snapshot_bytes gauge\n")
+
+	if s.scheduler == nil {
+		fmt.Fprintf(builder, "litebase_backup_upload_bytes_total 0\n")
+		return
+	}
+	bmList, uploadBytes, err := s.scheduler.CollectMetrics(r.Context())
+	fmt.Fprintf(builder, "litebase_backup_upload_bytes_total %d\n", uploadBytes)
+	if err != nil {
+		return
+	}
+	allKinds := []string{"branch", "manual", "pre-push", "pre-restore", "scheduled"}
+	for _, bm := range bmList {
+		fmt.Fprintf(builder, "litebase_backup_last_success_timestamp_seconds{db=%q} %d\n", bm.Database, bm.LastSuccessTimestamp)
+		fmt.Fprintf(builder, "litebase_backup_last_duration_seconds{db=%q} %.6f\n", bm.Database, bm.LastDurationSeconds)
+		fmt.Fprintf(builder, "litebase_backup_failures_total{db=%q} %d\n", bm.Database, bm.FailuresTotal)
+		fmt.Fprintf(builder, "litebase_snapshot_bytes{db=%q} %d\n", bm.Database, bm.SnapshotBytesTotal)
+		for _, kind := range allKinds {
+			fmt.Fprintf(builder, "litebase_snapshots{db=%q,kind=%q} %d\n", bm.Database, kind, bm.SnapshotsByKind[kind])
+		}
 	}
 }

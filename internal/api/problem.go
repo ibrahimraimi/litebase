@@ -8,24 +8,28 @@ import (
 	"strings"
 
 	"github.com/ibrahimraimi/litebase/internal/auth"
+	"github.com/ibrahimraimi/litebase/internal/backup"
 	"github.com/ibrahimraimi/litebase/internal/control"
 	"github.com/ibrahimraimi/litebase/internal/engine"
+	"github.com/ibrahimraimi/litebase/internal/manager"
 	"github.com/ibrahimraimi/litebase/internal/migrate"
+	"github.com/ibrahimraimi/litebase/internal/snapshot"
 )
 
 const (
-	CodeSQLError        = "sql_error"
-	CodeBusy            = "busy"
-	CodeQueueFull       = "queue_full"
-	CodeTimeout         = "timeout"
-	CodeUnauthorized    = "unauthorized"
-	CodeForbidden       = "forbidden"
-	CodeNotFound        = "not_found"
-	CodeInvalidRequest  = "invalid_request"
-	CodeConflict        = "conflict"
-	CodeRateLimited     = "rate_limited"
-	CodePayloadTooLarge = "payload_too_large"
-	CodeInternalError   = "internal_error"
+	CodeSQLError          = "sql_error"
+	CodeBusy              = "busy"
+	CodeQueueFull         = "queue_full"
+	CodeTimeout           = "timeout"
+	CodeUnauthorized      = "unauthorized"
+	CodeForbidden         = "forbidden"
+	CodeNotFound          = "not_found"
+	CodeInvalidRequest    = "invalid_request"
+	CodeConflict          = "conflict"
+	CodeSnapshotProtected = "SNAPSHOT_PROTECTED"
+	CodeRateLimited       = "rate_limited"
+	CodePayloadTooLarge   = "payload_too_large"
+	CodeInternalError     = "internal_error"
 )
 
 type ProblemDetail struct {
@@ -60,7 +64,7 @@ func writeMappedError(w http.ResponseWriter, err error) {
 func classifyError(err error) (int, string, string) {
 	var maxBytesErr *http.MaxBytesError
 	switch {
-	case errors.As(err, &maxBytesErr):
+	case errors.As(err, &maxBytesErr), errors.Is(err, backup.ErrDownloadTooLarge):
 		return http.StatusRequestEntityTooLarge, CodePayloadTooLarge, "request body exceeds maximum allowed size"
 	case errors.Is(err, engine.ErrInvalidIdentifier),
 		errors.Is(err, engine.ErrEmptyStatement),
@@ -68,14 +72,20 @@ func classifyError(err error) (int, string, string) {
 		errors.Is(err, engine.ErrInteractiveTxNotSupported),
 		errors.Is(err, migrate.ErrDropTableNotAllowed),
 		errors.Is(err, migrate.ErrManualMigrationRequired),
+		errors.Is(err, backup.ErrInvalidObjectKey),
+		errors.Is(err, backup.ErrRemoteNotConfigured),
 		errors.Is(err, auth.ErrInvalidScope):
 		return http.StatusBadRequest, CodeInvalidRequest, err.Error()
+	case errors.Is(err, snapshot.ErrSnapshotProtected):
+		return http.StatusConflict, CodeSnapshotProtected, err.Error()
 	case errors.Is(err, migrate.ErrChecksumMismatch),
 		errors.Is(err, migrate.ErrDeployInProgress),
 		errors.Is(err, migrate.ErrMergeConflict),
+		errors.Is(err, snapshot.ErrSnapshotChecksumMismatch),
 		errors.Is(err, control.ErrAlreadyExists):
 		return http.StatusConflict, CodeConflict, err.Error()
-	case errors.Is(err, control.ErrNotFound):
+	case errors.Is(err, control.ErrNotFound),
+		errors.Is(err, backup.ErrRemoteBackupNotFound):
 		return http.StatusNotFound, CodeNotFound, err.Error()
 	case errors.Is(err, auth.ErrMissingToken),
 		errors.Is(err, auth.ErrMalformedToken),
@@ -87,6 +97,8 @@ func classifyError(err error) (int, string, string) {
 		return http.StatusForbidden, CodeForbidden, err.Error()
 	case errors.Is(err, engine.ErrQueueFull):
 		return http.StatusServiceUnavailable, CodeQueueFull, err.Error()
+	case errors.Is(err, manager.ErrDatabaseRestoring):
+		return http.StatusServiceUnavailable, CodeBusy, err.Error()
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 		return http.StatusGatewayTimeout, CodeTimeout, "query execution timed out"
 	default:

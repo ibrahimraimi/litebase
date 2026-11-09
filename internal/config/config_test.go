@@ -5,8 +5,8 @@ import (
 )
 
 func TestSaveAndLoadProjectConfig(t *testing.T) {
-	if Version != "0.0.2-beta" {
-		t.Fatalf("expected Version 0.0.2-beta, got %q", Version)
+	if Version != "0.0.3-beta" {
+		t.Fatalf("expected Version 0.0.3-beta, got %q", Version)
 	}
 	workDir := t.TempDir()
 	cfg := DefaultProjectConfig("billing-service")

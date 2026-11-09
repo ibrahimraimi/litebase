@@ -149,11 +149,13 @@ func newTokenRevokeCommand(flags *RuntimeFlags) *cobra.Command {
 func newSnapshotCommand(flags *RuntimeFlags) *cobra.Command {
 	snapCmd := &cobra.Command{
 		Use:   "snapshot",
-		Short: "Create, list, and restore consistent database snapshots",
+		Short: "Create, list, delete, prune, and restore consistent database snapshots",
 	}
 	snapCmd.AddCommand(
 		newSnapshotCreateCommand(flags),
 		newSnapshotListCommand(flags),
+		newSnapshotDeleteCommand(flags),
+		newSnapshotPruneCommand(flags),
 		newSnapshotRestoreCommand(flags),
 	)
 	return snapCmd
@@ -161,6 +163,7 @@ func newSnapshotCommand(flags *RuntimeFlags) *cobra.Command {
 
 func newSnapshotCreateCommand(flags *RuntimeFlags) *cobra.Command {
 	var label string
+	var pin bool
 	cmd := &cobra.Command{
 		Use:   "create",
 		Short: "Create a consistent snapshot via VACUUM INTO",
@@ -169,7 +172,7 @@ func newSnapshotCreateCommand(flags *RuntimeFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			rec, err := apiClient.CreateSnapshot(cmd.Context(), dbName, label)
+			rec, err := apiClient.CreateSnapshotWithOptions(cmd.Context(), dbName, label, pin)
 			if err != nil {
 				return err
 			}
@@ -179,11 +182,13 @@ func newSnapshotCreateCommand(flags *RuntimeFlags) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&label, "label", "manual", "Snapshot label")
+	cmd.Flags().BoolVar(&pin, "pin", false, "Pin snapshot to protect it from deletion and pruning")
 	return cmd
 }
 
 func newSnapshotListCommand(flags *RuntimeFlags) *cobra.Command {
-	return &cobra.Command{
+	var remote bool
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List snapshots for the active database",
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -191,37 +196,118 @@ func newSnapshotListCommand(flags *RuntimeFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if remote {
+				snaps, rErr := apiClient.ListRemoteSnapshots(cmd.Context(), dbName)
+				if rErr != nil {
+					return rErr
+				}
+				for _, snap := range snaps {
+					fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\t%d bytes\t%s\t%s\n",
+						snap.SnapshotID, snap.DataKey, snap.SizeBytes, snap.Compression, snap.CreatedAt.Format("2006-01-02T15:04:05Z"))
+				}
+				return nil
+			}
 			snaps, err := apiClient.ListSnapshots(cmd.Context(), dbName)
 			if err != nil {
 				return err
 			}
 			for _, snap := range snaps {
-				fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\t%d bytes\t%s\n",
-					snap.ID, snap.Label, snap.SizeBytes, snap.CreatedAt.Format("2006-01-02T15:04:05Z"))
+				fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\t%s\t%d bytes\t%s\n",
+					snap.ID, snap.Label, snap.Kind, snap.SizeBytes, snap.CreatedAt.Format("2006-01-02T15:04:05Z"))
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&remote, "remote", false, "List remote backup objects instead of local snapshots")
+	return cmd
 }
 
-func newSnapshotRestoreCommand(flags *RuntimeFlags) *cobra.Command {
+func newSnapshotDeleteCommand(flags *RuntimeFlags) *cobra.Command {
 	return &cobra.Command{
-		Use:   "restore <snapshot-id>",
-		Short: "Restore the active database from a snapshot",
+		Use:   "delete <snapshot-id>",
+		Short: "Delete a snapshot by ID",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			apiClient, dbName, _, err := ResolveRemoteTarget(*flags)
 			if err != nil {
 				return err
 			}
-			restored, err := apiClient.RestoreSnapshot(cmd.Context(), dbName, args[0])
-			if err != nil {
+			if err := apiClient.DeleteSnapshot(cmd.Context(), dbName, args[0]); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Restored %q to snapshot %s\n", dbName, restored.ID)
+			fmt.Fprintf(cmd.OutOrStdout(), "Deleted snapshot %s\n", args[0])
 			return nil
 		},
 	}
+}
+
+func newSnapshotPruneCommand(flags *RuntimeFlags) *cobra.Command {
+	var dryRun bool
+	cmd := &cobra.Command{
+		Use:   "prune",
+		Short: "Prune expired snapshots according to the retention policy",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			apiClient, dbName, _, err := ResolveRemoteTarget(*flags)
+			if err != nil {
+				return err
+			}
+			res, err := apiClient.PruneSnapshots(cmd.Context(), dbName, dryRun)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Pruned %d snapshot(s) (%d bytes, dry_run=%v)\n",
+				len(res.DeletedIDs), res.FreedBytes, res.DryRun)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview snapshots that would be pruned without deleting them")
+	return cmd
+}
+
+func newSnapshotRestoreCommand(flags *RuntimeFlags) *cobra.Command {
+	var fromRemote string
+	var asNewDB string
+	cmd := &cobra.Command{
+		Use:   "restore [<snapshot-id>]",
+		Short: "Restore the active database from a local snapshot or remote backup",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			apiClient, dbName, _, err := ResolveRemoteTarget(*flags)
+			if err != nil {
+				return err
+			}
+			var snapshotID string
+			if len(args) > 0 {
+				snapshotID = args[0]
+			}
+			if snapshotID == "" && fromRemote == "" {
+				return errors.New("either <snapshot-id> or --from-remote <key|latest> is required")
+			}
+			res, err := apiClient.RestoreSnapshotWithOptions(cmd.Context(), dbName, client.RestoreSnapshotParams{
+				SnapshotID: snapshotID,
+				RemoteKey:  fromRemote,
+				As:         asNewDB,
+			})
+			if err != nil {
+				return err
+			}
+			targetDB := dbName
+			if asNewDB != "" {
+				targetDB = asNewDB
+			}
+			if res.RestoredRemote != nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "Restored %q from remote backup %s\n", targetDB, res.RestoredRemote.DataKey)
+				return nil
+			}
+			if res.RestoredSnapshot != nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "Restored %q to snapshot %s\n", targetDB, res.RestoredSnapshot.ID)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&fromRemote, "from-remote", "", "Restore from remote object key or 'latest'")
+	cmd.Flags().StringVar(&asNewDB, "as", "", "Restore into a new database instead of overwriting the active database")
+	return cmd
 }
 
 func newBranchCommand(flags *RuntimeFlags) *cobra.Command {

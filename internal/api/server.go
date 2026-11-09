@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/ibrahimraimi/litebase/internal/backup"
 	"github.com/ibrahimraimi/litebase/internal/branch"
 	"github.com/ibrahimraimi/litebase/internal/control"
 	"github.com/ibrahimraimi/litebase/internal/manager"
@@ -28,6 +29,9 @@ type ServerConfig struct {
 	RateLimitPerSec    float64
 	RateLimitBurst     float64
 	Logger             *slog.Logger
+	BlobStore          backup.BlobStore
+	BackupCompression  backup.CompressionMode
+	BackupMaxConc      int
 }
 
 func (cfg ServerConfig) withDefaults() ServerConfig {
@@ -56,6 +60,8 @@ type Server struct {
 	mgr       *manager.Manager
 	migrator  *migrate.Runner
 	snapshots *snapshot.Service
+	backups   *backup.Manager
+	scheduler *backup.Scheduler
 	branches  *branch.Service
 	limiter   *tokenRateLimiter
 	metrics   *serverMetrics
@@ -66,12 +72,31 @@ type Server struct {
 func NewServer(mgr *manager.Manager, cfg ServerConfig) *Server {
 	resolvedCfg := cfg.withDefaults()
 	snapSvc := snapshot.NewService(mgr)
+	blobStore := resolvedCfg.BlobStore
+	if blobStore == nil {
+		blobStore, _ = backup.LoadBlobStoreFromEnv()
+	}
+	backupMgr := backup.NewManager(backup.ManagerConfig{
+		DBManager:   mgr,
+		Snapshots:   snapSvc,
+		BlobStore:   blobStore,
+		Compression: resolvedCfg.BackupCompression,
+	})
+	sched := backup.NewScheduler(backup.SchedulerConfig{
+		DBManager:     mgr,
+		Snapshots:     snapSvc,
+		BackupManager: backupMgr,
+		MaxConcurrent: resolvedCfg.BackupMaxConc,
+		Logger:        resolvedCfg.Logger,
+	})
 	srv := &Server{
 		cfg:       resolvedCfg,
 		store:     mgr.Store(),
 		mgr:       mgr,
 		migrator:  migrate.NewRunner(mgr),
 		snapshots: snapSvc,
+		backups:   backupMgr,
+		scheduler: sched,
 		branches:  branch.NewService(mgr, snapSvc),
 		limiter:   newTokenRateLimiter(resolvedCfg.RateLimitPerSec, resolvedCfg.RateLimitBurst),
 		metrics:   newServerMetrics(),
@@ -81,11 +106,20 @@ func NewServer(mgr *manager.Manager, cfg ServerConfig) *Server {
 	return srv
 }
 
+func (s *Server) Scheduler() *backup.Scheduler {
+	return s.scheduler
+}
+
+func (s *Server) Backups() *backup.Manager {
+	return s.backups
+}
+
 func (s *Server) Handler() http.Handler {
 	return s.handler
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
+	_ = s.scheduler.Stop(ctx)
 	return s.mgr.CloseAll(ctx)
 }
 
@@ -110,6 +144,14 @@ func (s *Server) buildHandler() http.Handler {
 
 	mux.HandleFunc("POST /v1/databases/{db}/snapshots", s.requireAuth(s.handleCreateSnapshot))
 	mux.HandleFunc("GET /v1/databases/{db}/snapshots", s.requireAuth(s.handleListSnapshots))
+	mux.HandleFunc("DELETE /v1/databases/{db}/snapshots/{id}", s.requireAuth(s.handleDeleteSnapshot))
+	mux.HandleFunc("POST /v1/databases/{db}/snapshots/prune", s.requireAuth(s.handlePruneSnapshots))
+	mux.HandleFunc("GET /v1/databases/{db}/backup-policy", s.requireAuth(s.handleGetBackupPolicy))
+	mux.HandleFunc("PUT /v1/databases/{db}/backup-policy", s.requireAuth(s.handlePutBackupPolicy))
+	mux.HandleFunc("DELETE /v1/databases/{db}/backup-policy", s.requireAuth(s.handleDeleteBackupPolicy))
+	mux.HandleFunc("POST /v1/databases/{db}/backups/run", s.requireAuth(s.handleRunBackup))
+	mux.HandleFunc("GET /v1/databases/{db}/backups/status", s.requireAuth(s.handleGetBackupStatus))
+	mux.HandleFunc("POST /v1/databases/{db}/backups/verify", s.requireAuth(s.handleVerifyBackup))
 	mux.HandleFunc("POST /v1/databases/{db}/restore", s.requireAuth(s.handleRestoreSnapshot))
 	mux.HandleFunc("GET /v1/databases/{db}/download", s.requireAuth(s.handleDownloadDatabase))
 	mux.HandleFunc("PUT /v1/databases/{db}/upload", s.requireAuth(s.handleUploadDatabase))

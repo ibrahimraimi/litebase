@@ -11,6 +11,7 @@ import (
 
 	"github.com/ibrahimraimi/litebase/internal/api"
 	"github.com/ibrahimraimi/litebase/internal/auth"
+	"github.com/ibrahimraimi/litebase/internal/backup"
 	"github.com/ibrahimraimi/litebase/internal/cli"
 	"github.com/ibrahimraimi/litebase/internal/control"
 	"github.com/ibrahimraimi/litebase/internal/manager"
@@ -43,7 +44,16 @@ func TestEndToEndCLIAndServerWorkflow(t *testing.T) {
 		t.Fatalf("CreateToken: %v", err)
 	}
 
-	apiSrv := api.NewServer(mgr, api.ServerConfig{})
+	blobRoot := t.TempDir()
+	t.Setenv("LITEBASE_BACKUP_DIR", blobRoot)
+	blobStore, err := backup.NewLocalDirStore(blobRoot, "")
+	if err != nil {
+		t.Fatalf("NewLocalDirStore: %v", err)
+	}
+	apiSrv := api.NewServer(mgr, api.ServerConfig{
+		BlobStore:         blobStore,
+		BackupCompression: backup.CompressionGzip,
+	})
 	httpSrv := httptest.NewServer(apiSrv.Handler())
 	defer httpSrv.Close()
 
@@ -148,6 +158,67 @@ func verifyPullAndPushCLI(t *testing.T, projectDir string, adminToken string) {
 	remoteAfterPush := runCLI(t, projectDir, adminToken, "query", "--remote", "SELECT email FROM users WHERE email = 'local-push@example.com'")
 	if !strings.Contains(remoteAfterPush, "local-push@example.com") {
 		t.Fatalf("expected remote DB to contain row from pushed local DB, got: %s", remoteAfterPush)
+	}
+
+	verifyBackupsAndDisasterRecoveryCLI(t, projectDir, adminToken)
+}
+
+func verifyBackupsAndDisasterRecoveryCLI(t *testing.T, projectDir string, adminToken string) {
+	t.Helper()
+	pinOut := runCLI(t, projectDir, adminToken, "snapshot", "create", "--label", "pinned-v1", "--pin")
+	if !strings.Contains(pinOut, "Created snapshot") {
+		t.Fatalf("unexpected snapshot create --pin output: %s", pinOut)
+	}
+
+	polSetOut := runCLI(t, projectDir, adminToken, "backup", "policy", "set", "--every", "1h", "--keep-last", "2", "--keep-days", "7", "--remote")
+	if !strings.Contains(polSetOut, "Updated backup policy") {
+		t.Fatalf("unexpected backup policy set output: %s", polSetOut)
+	}
+
+	polShowOut := runCLI(t, projectDir, adminToken, "backup", "policy", "show")
+	if !strings.Contains(polShowOut, "enabled=true") {
+		t.Fatalf("unexpected backup policy show output: %s", polShowOut)
+	}
+
+	runOut := runCLI(t, projectDir, adminToken, "backup", "run")
+	if !strings.Contains(runOut, "Backup completed") {
+		t.Fatalf("unexpected backup run output: %s", runOut)
+	}
+
+	statusOut := runCLI(t, projectDir, adminToken, "backup", "status")
+	if !strings.Contains(statusOut, "pending_remote=0") {
+		t.Fatalf("unexpected backup status output: %s", statusOut)
+	}
+
+	remoteListOut := runCLI(t, projectDir, adminToken, "snapshot", "list", "--remote")
+	if !strings.Contains(remoteListOut, ".sqlite.gz") {
+		t.Fatalf("expected .sqlite.gz in remote snapshot list, got: %s", remoteListOut)
+	}
+
+	verifyOut := runCLI(t, projectDir, adminToken, "backup", "verify", "--remote", "--sample", "users")
+	if !strings.Contains(verifyOut, "integrity_ok=true") || !strings.Contains(verifyOut, "table users: 2 row(s)") {
+		t.Fatalf("unexpected backup verify output: %s", verifyOut)
+	}
+
+	pruneOut := runCLI(t, projectDir, adminToken, "snapshot", "prune", "--dry-run")
+	if !strings.Contains(pruneOut, "dry_run=true") {
+		t.Fatalf("unexpected snapshot prune output: %s", pruneOut)
+	}
+
+	restoreRemoteOut := runCLI(t, projectDir, adminToken, "snapshot", "restore", "--from-remote", "latest", "--as", "restored_main")
+	if !strings.Contains(restoreRemoteOut, `Restored "restored_main" from remote backup`) {
+		t.Fatalf("unexpected remote restore output: %s", restoreRemoteOut)
+	}
+
+	drDataDir := t.TempDir()
+	drCtrlOut := runCLI(t, projectDir, adminToken, "restore-control", "--from-remote", "latest", "--data-dir", drDataDir)
+	if !strings.Contains(drCtrlOut, "Restored control.db") {
+		t.Fatalf("unexpected restore-control output: %s", drCtrlOut)
+	}
+
+	disableOut := runCLI(t, projectDir, adminToken, "backup", "policy", "disable")
+	if !strings.Contains(disableOut, "Disabled backup policy") {
+		t.Fatalf("unexpected backup policy disable output: %s", disableOut)
 	}
 }
 

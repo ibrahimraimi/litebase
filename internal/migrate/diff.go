@@ -221,4 +221,3 @@ func ensureTrailingSemicolon(sqlText string) string {
 	}
 	return trimmed + ";"
 }
-

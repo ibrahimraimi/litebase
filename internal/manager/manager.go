@@ -60,11 +60,12 @@ type Manager struct {
 	logger                *slog.Logger
 	deleteOrphanSnapshots bool
 
-	mu         sync.Mutex
-	openDBs    map[string]*ManagedEntry
-	restoring  map[string]struct{}
-	renameFile func(oldpath string, newpath string) error
-	closed     bool
+	mu             sync.Mutex
+	openDBs        map[string]*ManagedEntry
+	restoring      map[string]struct{}
+	evictedBatches map[string]uint64
+	renameFile     func(oldpath string, newpath string) error
+	closed         bool
 }
 
 type Config struct {
@@ -108,6 +109,7 @@ func NewManager(cfg Config) (*Manager, error) {
 		deleteOrphanSnapshots: cfg.DeleteOrphanSnapshots,
 		openDBs:               make(map[string]*ManagedEntry),
 		restoring:             make(map[string]struct{}),
+		evictedBatches:        make(map[string]uint64),
 		renameFile:            os.Rename,
 	}
 	if err := mgr.recoverStartup(context.Background()); err != nil {
@@ -336,8 +338,25 @@ func (m *Manager) beginDatabaseRestore(name string) (*ManagedEntry, error) {
 	}
 	m.restoring[name] = struct{}{}
 	openEntry := m.openDBs[name]
+	if openEntry != nil {
+		m.evictedBatches[name] += openEntry.DB.Stats().TotalBatches
+	}
+	m.evictedBatches[name]++
 	delete(m.openDBs, name)
 	return openEntry, nil
+}
+
+func (m *Manager) TotalCommitsSinceStart(name string) (uint64, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, busy := m.restoring[name]; busy {
+		return 0, true
+	}
+	total := m.evictedBatches[name]
+	if entry, ok := m.openDBs[name]; ok {
+		total += entry.DB.Stats().TotalBatches
+	}
+	return total, false
 }
 
 func (m *Manager) finishDatabaseRestore(name string) {
@@ -365,6 +384,7 @@ func (m *Manager) EvictIdle(ctx context.Context, maxIdle time.Duration) int {
 	cutoff := time.Now().Add(-maxIdle)
 	for name, entry := range m.openDBs {
 		if entry.inFlight.Load() == 0 && entry.LastUsed().Before(cutoff) {
+			m.evictedBatches[name] += entry.DB.Stats().TotalBatches
 			delete(m.openDBs, name)
 			toClose = append(toClose, entry)
 		}
@@ -536,6 +556,9 @@ func fileExists(filePath string) bool {
 }
 
 func copyFileContents(srcPath string, dstPath string) error {
+	if err := os.MkdirAll(filepath.Dir(dstPath), 0o750); err != nil {
+		return err
+	}
 	srcFile, err := os.Open(srcPath)
 	if err != nil {
 		return err

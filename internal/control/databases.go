@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/ibrahimraimi/litebase/internal/engine"
@@ -84,7 +86,7 @@ func (s *Store) GetDatabaseByName(ctx context.Context, projectID string, name st
 		projectID,
 		name,
 	)
-	rec, err := scanDatabaseRow(row)
+	rec, err := s.scanDatabaseRow(row)
 	if err == nil {
 		return rec, nil
 	}
@@ -111,7 +113,7 @@ func (s *Store) findUniqueBranchDatabase(ctx context.Context, projectID string, 
 
 	var matches []DatabaseRecord
 	for rows.Next() {
-		rec, err := scanDatabaseRow(rows)
+		rec, err := s.scanDatabaseRow(rows)
 		if err != nil {
 			return DatabaseRecord{}, err
 		}
@@ -134,7 +136,7 @@ func (s *Store) GetDatabaseByID(ctx context.Context, databaseID string) (Databas
 		 WHERE id = ? AND deleted_at IS NULL`,
 		databaseID,
 	)
-	return scanDatabaseRow(row)
+	return s.scanDatabaseRow(row)
 }
 
 func (s *Store) ListDatabases(ctx context.Context, projectID string) ([]DatabaseRecord, error) {
@@ -156,7 +158,7 @@ func (s *Store) ListDatabases(ctx context.Context, projectID string) ([]Database
 
 	records := make([]DatabaseRecord, 0)
 	for rows.Next() {
-		rec, err := scanDatabaseRow(rows)
+		rec, err := s.scanDatabaseRow(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -201,7 +203,7 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
-func scanDatabaseRow(scanner rowScanner) (DatabaseRecord, error) {
+func (s *Store) scanDatabaseRow(scanner rowScanner) (DatabaseRecord, error) {
 	var rec DatabaseRecord
 	var durabilityStr string
 	var createdStr string
@@ -219,6 +221,14 @@ func scanDatabaseRow(scanner rowScanner) (DatabaseRecord, error) {
 			return DatabaseRecord{}, ErrNotFound
 		}
 		return DatabaseRecord{}, err
+	}
+	if s.dataDir != "" {
+		if rel := extractRelativePathInDataDir(s.dataDir, rec.Path, "databases"); rel != "" {
+			segments := strings.Split(filepath.ToSlash(rel), "/")
+			if resolved, joinErr := engine.SafeJoinPath(s.dataDir, segments...); joinErr == nil {
+				rec.Path = resolved
+			}
+		}
 	}
 	rec.Durability = engine.DurabilityMode(durabilityStr)
 	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdStr)

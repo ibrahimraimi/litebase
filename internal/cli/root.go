@@ -33,6 +33,8 @@ func NewRootCommand() *cobra.Command {
 		newDatabaseCommand(flags),
 		newTokenCommand(flags),
 		newSnapshotCommand(flags),
+		newBackupCommand(flags),
+		newRestoreControlCommand(),
 		newBranchCommand(flags),
 		newPushCommand(flags),
 		newPullCommand(flags),
