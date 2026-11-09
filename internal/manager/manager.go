@@ -5,13 +5,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"log/slog"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/ibrahimraimi/litebase/internal/control"
 	"github.com/ibrahimraimi/litebase/internal/engine"
+	"github.com/ibrahimraimi/litebase/internal/testhook"
 )
 
 type ManagedEntry struct {
@@ -46,12 +51,14 @@ type DatabaseMetrics struct {
 }
 
 type Manager struct {
-	dataDir       string
-	store         *control.Store
-	sqlEngine     engine.Engine
-	defaultOpts   engine.Options
-	maxDBSizeByte int64
-	walAlertBytes int64
+	dataDir               string
+	store                 *control.Store
+	sqlEngine             engine.Engine
+	defaultOpts           engine.Options
+	maxDBSizeByte         int64
+	walAlertBytes         int64
+	logger                *slog.Logger
+	deleteOrphanSnapshots bool
 
 	mu         sync.Mutex
 	openDBs    map[string]*ManagedEntry
@@ -67,6 +74,8 @@ type Config struct {
 	DefaultOptions         engine.Options
 	MaxDBSizeBytes         int64
 	WALAlertThresholdBytes int64
+	Logger                 *slog.Logger
+	DeleteOrphanSnapshots  bool
 }
 
 func NewManager(cfg Config) (*Manager, error) {
@@ -84,17 +93,27 @@ func NewManager(cfg Config) (*Manager, error) {
 	if walAlert <= 0 {
 		walAlert = DefaultWALAlertThresholdBytes
 	}
-	return &Manager{
-		dataDir:       cfg.DataDir,
-		store:         cfg.Store,
-		sqlEngine:     sqlEng,
-		defaultOpts:   cfg.DefaultOptions,
-		maxDBSizeByte: cfg.MaxDBSizeBytes,
-		walAlertBytes: walAlert,
-		openDBs:       make(map[string]*ManagedEntry),
-		restoring:     make(map[string]struct{}),
-		renameFile:    os.Rename,
-	}, nil
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	mgr := &Manager{
+		dataDir:               cfg.DataDir,
+		store:                 cfg.Store,
+		sqlEngine:             sqlEng,
+		defaultOpts:           cfg.DefaultOptions,
+		maxDBSizeByte:         cfg.MaxDBSizeBytes,
+		walAlertBytes:         walAlert,
+		logger:                logger,
+		deleteOrphanSnapshots: cfg.DeleteOrphanSnapshots,
+		openDBs:               make(map[string]*ManagedEntry),
+		restoring:             make(map[string]struct{}),
+		renameFile:            os.Rename,
+	}
+	if err := mgr.recoverStartup(context.Background()); err != nil {
+		return nil, err
+	}
+	return mgr, nil
 }
 
 func (m *Manager) DataDir() string {
@@ -384,23 +403,136 @@ func (m *Manager) CloseAll(ctx context.Context) error {
 func (m *Manager) swapStagedDatabaseFile(targetDBPath string, stagingPath string) error {
 	preRestorePath := targetDBPath + ".pre-restore"
 	hadOriginal := false
-	if _, err := os.Stat(targetDBPath); err == nil {
-		if err := os.Rename(targetDBPath, preRestorePath); err != nil {
+	if fileExists(targetDBPath) {
+		if err := engine.AtomicReplace(targetDBPath, preRestorePath); err != nil {
 			_ = os.Remove(stagingPath)
 			return fmt.Errorf("backup target db to .pre-restore: %w", err)
 		}
 		hadOriginal = true
 	}
+	testhook.At("restore.after-rename")
 	_ = os.Remove(targetDBPath + "-wal")
 	_ = os.Remove(targetDBPath + "-shm")
-	if err := m.renameFile(stagingPath, targetDBPath); err != nil {
+	testhook.At("restore.after-wal-remove")
+	err := engine.AtomicReplaceWithHooks(stagingPath, targetDBPath, engine.AtomicReplaceHooks{
+		Rename: m.renameFile,
+	})
+	if err != nil {
 		_ = os.Remove(stagingPath)
 		if hadOriginal {
-			_ = os.Rename(preRestorePath, targetDBPath)
+			_ = engine.AtomicReplace(preRestorePath, targetDBPath)
 		}
 		return fmt.Errorf("rename staged snapshot into place: %w", err)
 	}
 	return nil
+}
+
+func (m *Manager) recoverStartup(ctx context.Context) error {
+	records, err := m.store.ListDatabases(ctx, control.DefaultProjectID)
+	if err != nil {
+		return fmt.Errorf("list databases for startup recovery: %w", err)
+	}
+	for _, rec := range records {
+		if err := m.recoverDatabasePath(ctx, rec); err != nil {
+			return err
+		}
+	}
+	return m.recoverSnapshotsDirectory(ctx, records)
+}
+
+func (m *Manager) recoverDatabasePath(ctx context.Context, rec control.DatabaseRecord) error {
+	dbPath := rec.Path
+	preRestorePath := dbPath + ".pre-restore"
+	stagingPath := dbPath + ".restore-staging"
+
+	hasDB := fileExists(dbPath)
+	hasPreRestore := fileExists(preRestorePath)
+	hasStaging := fileExists(stagingPath)
+
+	if hasDB && hasStaging {
+		_ = os.Remove(stagingPath)
+		_ = engine.SyncParentDir(filepath.Dir(dbPath))
+		return nil
+	}
+	if !hasDB && hasPreRestore {
+		_ = os.Remove(stagingPath)
+		_ = os.Remove(dbPath + "-wal")
+		_ = os.Remove(dbPath + "-shm")
+		if err := engine.AtomicReplace(preRestorePath, dbPath); err != nil {
+			return fmt.Errorf("recover database %q from .pre-restore: %w", rec.Name, err)
+		}
+		m.logger.Warn("recovered database from interrupted restore",
+			"database", rec.Name,
+			"path", dbPath,
+		)
+		_ = m.store.RecordAudit(ctx, control.AuditParams{
+			Actor:   "system",
+			Action:  "database.restore.recovered",
+			Target:  rec.Name,
+			Details: map[string]string{"restored_from": preRestorePath},
+		})
+	}
+	return nil
+}
+
+func (m *Manager) recoverSnapshotsDirectory(ctx context.Context, records []control.DatabaseRecord) error {
+	snapshotsRoot := filepath.Join(m.dataDir, "snapshots")
+	if !fileExists(snapshotsRoot) {
+		return nil
+	}
+	recordedPaths := make(map[string]struct{})
+	for _, rec := range records {
+		snaps, err := m.store.ListSnapshotRecords(ctx, rec.ID)
+		if err != nil {
+			return err
+		}
+		for _, snap := range snaps {
+			recordedPaths[filepath.Clean(snap.Path)] = struct{}{}
+		}
+	}
+	return filepath.WalkDir(snapshotsRoot, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil || d.IsDir() {
+			return walkErr
+		}
+		return m.inspectSnapshotFileOnStartup(path, d, recordedPaths)
+	})
+}
+
+func (m *Manager) inspectSnapshotFileOnStartup(
+	filePath string,
+	d fs.DirEntry,
+	recordedPaths map[string]struct{},
+) error {
+	cleanPath := filepath.Clean(filePath)
+	if strings.HasSuffix(cleanPath, ".tmp") {
+		_ = os.Remove(cleanPath)
+		_ = engine.SyncParentDir(filepath.Dir(cleanPath))
+		return nil
+	}
+	if _, isRecorded := recordedPaths[cleanPath]; isRecorded {
+		return nil
+	}
+	info, err := d.Info()
+	if err != nil {
+		return nil
+	}
+	age := time.Since(info.ModTime())
+	if age >= time.Hour {
+		m.logger.Warn("orphan snapshot file found without control record",
+			"path", cleanPath,
+			"age_seconds", int64(age.Seconds()),
+		)
+		if m.deleteOrphanSnapshots {
+			_ = os.Remove(cleanPath)
+			_ = engine.SyncParentDir(filepath.Dir(cleanPath))
+		}
+	}
+	return nil
+}
+
+func fileExists(filePath string) bool {
+	_, err := os.Stat(filePath)
+	return err == nil
 }
 
 func copyFileContents(srcPath string, dstPath string) error {
@@ -422,7 +554,11 @@ func copyFileContents(srcPath string, dstPath string) error {
 		_ = dstFile.Close()
 		return err
 	}
-	return dstFile.Close()
+	if err := dstFile.Close(); err != nil {
+		return err
+	}
+	testhook.At("restore.during-staging")
+	return nil
 }
 
 func (m *Manager) CollectDatabaseMetrics(ctx context.Context) ([]DatabaseMetrics, error) {

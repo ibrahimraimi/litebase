@@ -316,3 +316,14 @@ func (s *Store) RecordAudit(ctx context.Context, params AuditParams) error {
 	)
 	return err
 }
+
+func (s *Store) CountAuditEvents(ctx context.Context, action string, target string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM audit_log WHERE action = ? AND target = ?`,
+		action,
+		target,
+	).Scan(&count)
+	return count, err
+}

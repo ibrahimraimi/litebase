@@ -36,6 +36,12 @@ jobs:
       - name: Run repeated SIGKILL crash durability loop
         run: go test -count=50 -v -run=^TestCrashDurabilityKill9$ ./internal/engine/...
 
+      - name: Run repeated SIGKILL restore crash recovery loop
+        run: go test -count=50 -v -run=^TestRestoreCrashRecoveryOnStartup$ ./internal/manager/...
+
+      - name: Run repeated SIGKILL snapshot crash recovery loop
+        run: go test -count=50 -v -run=^TestSnapshotCrashRecoveryLeavesNoUnrecordedFilesOrTmp$ ./internal/snapshot/...
+
       - name: Run engine benchmarks
         run: make bench
 
