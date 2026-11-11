@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Updated RFC 9457 Problem Details `type` URI prefix from `https://litebase.dev/problems/` to `https://litebase.tech/problems/`.
 
+### Fixed
+
+- `install.sh` now resolves the default release version from GitHub's `releases.atom` feed first (with SemVer comparison and automatic fallback to the REST API), avoiding HTTP `403` unauthenticated REST API rate-limit failures on shared IPs.
+
 ---
 
 ## [0.0.3-beta] - 2026-11-09
