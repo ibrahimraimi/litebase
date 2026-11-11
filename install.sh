@@ -14,6 +14,7 @@ set -eu
 
 GITHUB_REPO="ibrahimraimi/litebase"
 DEFAULT_DOWNLOAD_BASE="https://github.com/${GITHUB_REPO}/releases/download"
+DEFAULT_FEED_URL="https://github.com/${GITHUB_REPO}/releases.atom"
 DEFAULT_API_RELEASES_URL="https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=10"
 BINARY_NAME="litebase"
 CHECKSUM_FILE="checksums.txt"
@@ -21,6 +22,8 @@ CHECKSUM_FILE="checksums.txt"
 TMP_DIR=""
 STAGED_TARGET=""
 USED_SUDO=0
+LAST_HTTP_STATUS="unknown"
+LAST_CURL_EXIT=0
 
 err() {
 	printf 'Error: %s\n' "$*" >&2
@@ -157,53 +160,165 @@ http_download() {
 	src_url="$1"
 	dest_file="$2"
 	validate_url_scheme "$src_url"
+	LAST_HTTP_STATUS="unknown"
+	LAST_CURL_EXIT=0
 
 	if command -v curl >/dev/null 2>&1; then
+		http_code="000"
+		curl_rc=0
 		case "$src_url" in
 			https://*)
-				curl -fsSL --proto '=https' --tlsv1.2 --retry 3 -o "$dest_file" "$src_url"
+				http_code=$(curl -sSL --proto '=https' --tlsv1.2 --retry 3 -w '%{http_code}' -o "$dest_file" "$src_url" 2>/dev/null) || curl_rc=$?
 				;;
 			*)
-				curl -fsSL --proto '=http,https' --retry 3 -o "$dest_file" "$src_url"
+				http_code=$(curl -sSL --proto '=http,https' --retry 3 -w '%{http_code}' -o "$dest_file" "$src_url" 2>/dev/null) || curl_rc=$?
 				;;
 		esac
-		return
+		LAST_HTTP_STATUS="${http_code:-000}"
+		LAST_CURL_EXIT="$curl_rc"
+		if [ "$curl_rc" -ne 0 ]; then
+			rm -f "$dest_file"
+			return 1
+		fi
+		case "$LAST_HTTP_STATUS" in
+			2??)
+				return 0
+				;;
+			*)
+				rm -f "$dest_file"
+				LAST_CURL_EXIT=22
+				return 1
+				;;
+		esac
 	fi
 
 	if command -v wget >/dev/null 2>&1; then
+		wget_rc=0
 		case "$src_url" in
 			https://*)
-				wget -q --https-only -O "$dest_file" "$src_url"
+				wget -q --https-only -O "$dest_file" "$src_url" 2>/dev/null || wget_rc=$?
 				;;
 			*)
-				wget -q -O "$dest_file" "$src_url"
+				wget -q -O "$dest_file" "$src_url" 2>/dev/null || wget_rc=$?
 				;;
 		esac
-		return
+		LAST_CURL_EXIT="$wget_rc"
+		if [ "$wget_rc" -ne 0 ]; then
+			rm -f "$dest_file"
+			return 1
+		fi
+		LAST_HTTP_STATUS="200"
+		return 0
 	fi
 
 	err "Neither curl nor wget was found. Install curl or wget and try again."
 	exit 1
 }
 
-parse_latest_release_tag() {
+select_newest_semver_tag() {
+	awk '
+		/^[vV]?[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z._-]+)?$/ {
+			raw = $0
+			ver = raw
+			sub(/^[vV]/, "", ver)
+
+			dash = index(ver, "-")
+			if (dash > 0) {
+				core = substr(ver, 1, dash - 1)
+				pre = substr(ver, dash + 1)
+				is_stable = 0
+			} else {
+				core = ver
+				pre = ""
+				is_stable = 1
+			}
+
+			n = split(core, parts, ".")
+			if (n < 3) {
+				next
+			}
+			maj = parts[1] + 0
+			min = parts[2] + 0
+			pat = parts[3] + 0
+
+			better = 0
+			if (!have_best) {
+				better = 1
+			} else if (maj != best_maj) {
+				better = (maj > best_maj)
+			} else if (min != best_min) {
+				better = (min > best_min)
+			} else if (pat != best_pat) {
+				better = (pat > best_pat)
+			} else if (is_stable != best_stable) {
+				better = (is_stable > best_stable)
+			} else if (pre > best_pre) {
+				better = 1
+			}
+
+			if (better) {
+				have_best = 1
+				best_raw = raw
+				best_maj = maj
+				best_min = min
+				best_pat = pat
+				best_stable = is_stable
+				best_pre = pre
+			}
+		}
+		END {
+			if (have_best) {
+				print best_raw
+			}
+		}
+	'
+}
+
+parse_release_tags_from_atom() {
+	awk '
+		/<link[^>]*\/releases\/tag\/[^"]+"/ {
+			line = $0
+			sub(/^.*\/releases\/tag\//, "", line)
+			sub(/".*$/, "", line)
+			print line
+		}
+	' | select_newest_semver_tag
+}
+
+parse_release_tags_from_json() {
 	tr '{},' '\n\n\n' | awk '
 		/"tag_name"[[:space:]]*:/ {
 			line = $0
 			sub(/^.*"tag_name"[[:space:]]*:[[:space:]]*"/, "", line)
 			sub(/".*$/, "", line)
 			tag = line
+			if (draft_state == "false") {
+				print tag
+				tag = ""
+				draft_state = ""
+			} else if (draft_state == "true") {
+				tag = ""
+				draft_state = ""
+			}
 		}
 		/"draft"[[:space:]]*:[[:space:]]*false/ {
 			if (tag != "") {
 				print tag
-				exit 0
+				tag = ""
+				draft_state = ""
+			} else {
+				draft_state = "false"
 			}
 		}
 		/"draft"[[:space:]]*:[[:space:]]*true/ {
-			tag = ""
+			if (tag != "") {
+				tag = ""
+				draft_state = ""
+			} else {
+				draft_state = "true"
+			}
 		}
-	'
+	' | select_newest_semver_tag
 }
 
 validate_version_tag() {
@@ -220,43 +335,74 @@ validate_version_tag() {
 	fi
 }
 
+set_resolved_version() {
+	raw_tag="$1"
+	validate_version_tag "$raw_tag"
+	case "$raw_tag" in
+		v*) RESOLVED_TAG="$raw_tag" ;;
+		*) RESOLVED_TAG="v${raw_tag}" ;;
+	esac
+	RESOLVED_VERSION_NO_V="${RESOLVED_TAG#v}"
+}
+
 resolve_version() {
 	requested_version="$1"
 	download_base="$2"
 
 	if [ -n "$requested_version" ]; then
-		validate_version_tag "$requested_version"
-		case "$requested_version" in
-			v*) RESOLVED_TAG="$requested_version" ;;
-			*) RESOLVED_TAG="v${requested_version}" ;;
-		esac
-		RESOLVED_VERSION_NO_V="${RESOLVED_TAG#v}"
+		set_resolved_version "$requested_version"
 		return 0
 	fi
 
+	feed_url="$DEFAULT_FEED_URL"
 	api_url="$DEFAULT_API_RELEASES_URL"
 	if [ -n "${LITEBASE_DOWNLOAD_BASE:-}" ]; then
+		feed_url="${download_base}/releases.atom"
 		api_url="${download_base}/releases.json"
 	fi
 
+	feed_tmp="${TMP_DIR}/releases.atom"
+	feed_status="none"
+	feed_exit=0
+	if http_download "$feed_url" "$feed_tmp"; then
+		feed_status="$LAST_HTTP_STATUS"
+		parsed_tag=$(parse_release_tags_from_atom <"$feed_tmp" || true)
+		if [ -n "$parsed_tag" ]; then
+			set_resolved_version "$parsed_tag"
+			return 0
+		fi
+	else
+		feed_status="$LAST_HTTP_STATUS"
+		feed_exit="$LAST_CURL_EXIT"
+	fi
+
 	releases_tmp="${TMP_DIR}/releases.json"
-	if ! http_download "$api_url" "$releases_tmp"; then
-		err "Failed to query releases from ${api_url}. Pass --version <tag> or set LITEBASE_VERSION."
-		exit 1
+	api_status="none"
+	api_exit=0
+	if http_download "$api_url" "$releases_tmp"; then
+		api_status="$LAST_HTTP_STATUS"
+		parsed_tag=$(parse_release_tags_from_json <"$releases_tmp" || true)
+		if [ -n "$parsed_tag" ]; then
+			set_resolved_version "$parsed_tag"
+			return 0
+		fi
+	else
+		api_status="$LAST_HTTP_STATUS"
+		api_exit="$LAST_CURL_EXIT"
 	fi
 
-	parsed_tag=$(parse_latest_release_tag <"$releases_tmp" || true)
-	if [ -z "$parsed_tag" ]; then
-		err "Could not find a published release tag from ${api_url}. Pass --version <tag> or set LITEBASE_VERSION."
-		exit 1
+	err "Failed to resolve the latest Litebase release version (feed HTTP ${feed_status}, curl exit ${feed_exit}; API HTTP ${api_status}, curl exit ${api_exit})."
+	if [ "$feed_status" = "403" ] || [ "$feed_status" = "429" ] || [ "$api_status" = "403" ] || [ "$api_status" = "429" ]; then
+		rate_code="$api_status"
+		if [ "$rate_code" != "403" ] && [ "$rate_code" != "429" ]; then
+			rate_code="$feed_status"
+		fi
+		err "HTTP ${rate_code} indicates a probable GitHub rate limit on your IP address."
 	fi
-
-	validate_version_tag "$parsed_tag"
-	case "$parsed_tag" in
-		v*) RESOLVED_TAG="$parsed_tag" ;;
-		*) RESOLVED_TAG="v${parsed_tag}" ;;
-	esac
-	RESOLVED_VERSION_NO_V="${RESOLVED_TAG#v}"
+	err "Pass --version <tag> or set LITEBASE_VERSION to install a specific release directly, for example:"
+	err "  curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPO}/main/install.sh | LITEBASE_VERSION=v0.0.3-beta sh"
+	err "  sh install.sh --version v0.0.3-beta"
+	exit 1
 }
 
 compute_sha256() {
@@ -489,13 +635,19 @@ main() {
 
 	info "Downloading ${checksums_url}..."
 	if ! http_download "$checksums_url" "$checksums_tmp"; then
-		err "Failed to download ${CHECKSUM_FILE} from ${checksums_url}."
+		err "Failed to download ${CHECKSUM_FILE} from ${checksums_url} (HTTP ${LAST_HTTP_STATUS}, curl exit ${LAST_CURL_EXIT})."
+		if [ "$LAST_HTTP_STATUS" = "403" ] || [ "$LAST_HTTP_STATUS" = "429" ]; then
+			err "HTTP ${LAST_HTTP_STATUS} indicates a probable GitHub rate limit on your IP address."
+		fi
 		exit 1
 	fi
 
 	info "Downloading ${archive_url}..."
 	if ! http_download "$archive_url" "$archive_tmp"; then
-		err "Failed to download release archive from ${archive_url}."
+		err "Failed to download release archive from ${archive_url} (HTTP ${LAST_HTTP_STATUS}, curl exit ${LAST_CURL_EXIT})."
+		if [ "$LAST_HTTP_STATUS" = "403" ] || [ "$LAST_HTTP_STATUS" = "429" ]; then
+			err "HTTP ${LAST_HTTP_STATUS} indicates a probable GitHub rate limit on your IP address."
+		fi
 		exit 1
 	fi
 
