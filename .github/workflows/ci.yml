@@ -114,3 +114,17 @@ jobs:
           docker stop litebase-ci
           docker rm litebase-ci
 
+  installer-test:
+    name: ShellCheck & Installer Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run ShellCheck on install scripts
+        run: shellcheck install.sh scripts/test-install.sh
+
+      - name: Run installer test suite (sh, dash, bash)
+        run: sh scripts/test-install.sh
+
+

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- POSIX `sh` CLI installer (`install.sh`) with prerelease discovery, mandatory SHA-256 checksum verification (`checksums.txt`), musl/Windows safety checks, `--dry-run`, atomic binary replacement, and end-to-end installer test suite (`scripts/test-install.sh`).
+- Installer operations guide (`docs/operations/install.md`) covering flags, environment variables, supported platforms, verification, trust model, and uninstallation.
+
+### Changed
+
+- Updated RFC 9457 Problem Details `type` URI prefix from `https://litebase.dev/problems/` to `https://litebase.tech/problems/`.
+
+---
+
 ## [0.0.3-beta] - 2026-11-09
 
 ### Added
