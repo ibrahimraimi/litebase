@@ -18,10 +18,10 @@ An ADR records one significant decision: what we chose, why, and what it costs u
 | [0010](0010-migration-history-inside-the-database.md) | Migration history lives inside each database | Accepted |
 | [0011](0011-branches-are-copies-schema-only-merge.md) | Branches are copies; merge is schema-only and three-way | Accepted |
 | [0012](0012-snapshots-via-vacuum-into.md) | Snapshots use `VACUUM INTO`; restore keeps the original aside | Accepted |
-| [0013](0013-backup-credentials-from-environment.md) | Backup credentials come from the environment | Proposed |
-| [0014](0014-backup-remote-layout-and-commit-marker.md) | Remote backup layout with a metadata file written last | Proposed |
-| [0015](0015-retention-protects-referenced-snapshots.md) | Retention never deletes a snapshot that is still needed | Proposed |
-| [0016](0016-restore-verifies-and-rolls-back.md) | Restore verifies before it replaces; interrupted restore rolls back | Proposed |
+| [0013](0013-backup-credentials-from-environment.md) | Backup credentials come from the environment | Accepted |
+| [0014](0014-backup-remote-layout-and-commit-marker.md) | Remote backup layout with a metadata file written last | Accepted |
+| [0015](0015-retention-protects-referenced-snapshots.md) | Retention never deletes a snapshot that is still needed | Accepted |
+| [0016](0016-restore-verifies-and-rolls-back.md) | Restore verifies before it replaces; interrupted restore rolls back | Accepted |
 | [0017](0017-pitr-via-litestream-deferred.md) | Point-in-time recovery will integrate Litestream | Proposed |
 
 ## Statuses

@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -22,7 +23,10 @@ jobs:
           - runner: ubuntu-24.04-arm
             goos: linux
             goarch: arm64
-          - runner: macos-13
+          # GitHub retired macos-13 on 2025-12-04; macos-15-intel is on a retirement clock
+          # (scheduled for retirement in Fall 2027 when GitHub phases out Intel x86_64 macOS runners).
+          # Follow-up issue tracks building darwin/amd64 on macos-latest (arm64).
+          - runner: macos-15-intel
             goos: darwin
             goarch: amd64
           - runner: macos-latest
@@ -31,6 +35,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -38,18 +44,35 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Run GoReleaser snapshot build (workflow_dispatch dry-run)
+        if: github.event_name == 'workflow_dispatch'
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: build --snapshot --clean --single-target
+        env:
+          CGO_ENABLED: "1"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+
       - name: Build release archive
         env:
           CGO_ENABLED: "1"
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "${GITHUB_REF_NAME}" == v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="0.0.3-beta-snapshot"
+          fi
           COMMIT="$(git rev-parse --short HEAD)"
           BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           LDFLAGS="-s -w -X github.com/ibrahimraimi/litebase/internal/config.Version=${VERSION} -X github.com/ibrahimraimi/litebase/internal/config.Commit=${COMMIT} -X github.com/ibrahimraimi/litebase/internal/config.BuildDate=${BUILD_DATE}"
           mkdir -p dist
           go build -trimpath -ldflags "${LDFLAGS}" -o dist/litebase ./cmd/litebase
+          ./dist/litebase --version
+          ./dist/litebase serve --help >/dev/null
           cp README.md CHANGELOG.md dist/
           ARCHIVE="litebase_${VERSION}_${GOOS}_${GOARCH}.tar.gz"
           tar -C dist -czf "${ARCHIVE}" litebase README.md CHANGELOG.md
@@ -63,6 +86,7 @@ jobs:
   release:
     name: Publish GitHub Release
     needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts

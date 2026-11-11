@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/mattn/go-sqlite3"
 )
 
 func TestConcurrent10kWritesAndConcurrentReaders(t *testing.T) {
@@ -498,5 +500,108 @@ func TestVacuumIntoConcurrentWithWrites(t *testing.T) {
 	defer snapDB.Close(ctx)
 	if err := snapDB.IntegrityCheck(ctx); err != nil {
 		t.Fatalf("snapshot IntegrityCheck failed: %v", err)
+	}
+}
+
+type authorizerEvent struct {
+	action int
+	arg1   string
+	arg2   string
+	arg3   string
+}
+
+// TestAuthorizerCallbackSignatureAndArgumentsContract verifies the contract of
+// github.com/mattn/go-sqlite3's RegisterAuthorizer (sqlite3.go:599, callback.go:80-83):
+//   - Callback signature is func(int, string, string, string) int (4 args, dropping
+//     SQLite's 5th C argument for the innermost trigger/view name).
+//   - Quoted/bracketed/backticked table and column identifiers arrive unquoted in arg1/arg2.
+//   - arg3 is the SQLite database name ("main"), never the trigger or view name.
+func TestAuthorizerCallbackSignatureAndArgumentsContract(t *testing.T) {
+	var _ func(*sqlite3.SQLiteConn, func(int, string, string, string) int) = (*sqlite3.SQLiteConn).RegisterAuthorizer
+
+	var (
+		mu     sync.Mutex
+		events []authorizerEvent
+	)
+	recordEvent := func(action int, arg1, arg2, arg3 string) int {
+		mu.Lock()
+		events = append(events, authorizerEvent{
+			action: action,
+			arg1:   arg1,
+			arg2:   arg2,
+			arg3:   arg3,
+		})
+		mu.Unlock()
+		return sqlite3.SQLITE_OK
+	}
+
+	dbPath := filepath.Join(t.TempDir(), "authz_contract.sqlite")
+	drv := &sqlite3.SQLiteDriver{
+		ConnectHook: func(conn *sqlite3.SQLiteConn) error {
+			conn.RegisterAuthorizer(recordEvent)
+			return nil
+		},
+	}
+	pool := sql.OpenDB(&dsnConnector{dsn: buildWriterDSN(dbPath), sqliteDriver: drv})
+	pool.SetMaxOpenConns(1)
+	defer pool.Close()
+
+	ctx := context.Background()
+	setupSQL := []string{
+		`CREATE TABLE "Orders" ("id" INTEGER PRIMARY KEY, [item name] TEXT)`,
+		`CREATE TABLE ` + "`audit_log`" + ` (id INTEGER PRIMARY KEY, order_id INTEGER)`,
+		`CREATE VIEW v_orders AS SELECT "id", [item name] FROM "Orders"`,
+		`CREATE TRIGGER trg_orders_audit AFTER INSERT ON "Orders" BEGIN INSERT INTO ` + "`audit_log`" + ` (order_id) VALUES (NEW.id); END`,
+	}
+	for _, stmt := range setupSQL {
+		if _, err := pool.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("setup %q: %v", stmt, err)
+		}
+	}
+
+	mu.Lock()
+	events = nil
+	mu.Unlock()
+
+	if _, err := pool.ExecContext(ctx, `INSERT INTO "Orders" ([item name]) VALUES ('widget')`); err != nil {
+		t.Fatalf("insert with trigger: %v", err)
+	}
+	rows, err := pool.QueryContext(ctx, `SELECT [item name] FROM v_orders`)
+	if err != nil {
+		t.Fatalf("select from view: %v", err)
+	}
+	_ = rows.Close()
+
+	mu.Lock()
+	captured := append([]authorizerEvent(nil), events...)
+	mu.Unlock()
+
+	sawUnquotedOrdersInsert := false
+	sawUnquotedAuditInsert := false
+	sawUnquotedOrdersRead := false
+
+	for _, ev := range captured {
+		if ev.arg3 == "trg_orders_audit" || ev.arg3 == "v_orders" {
+			t.Fatalf("mattn/go-sqlite3 callback contract changed: arg3 received trigger/view name %q instead of database name", ev.arg3)
+		}
+		if ev.action == sqlite3.SQLITE_INSERT && ev.arg1 == "Orders" && ev.arg3 == "main" {
+			sawUnquotedOrdersInsert = true
+		}
+		if ev.action == sqlite3.SQLITE_INSERT && ev.arg1 == "audit_log" && ev.arg3 == "main" {
+			sawUnquotedAuditInsert = true
+		}
+		if ev.action == sqlite3.SQLITE_READ && ev.arg1 == "Orders" && ev.arg2 == "item name" && ev.arg3 == "main" {
+			sawUnquotedOrdersRead = true
+		}
+	}
+
+	if !sawUnquotedOrdersInsert {
+		t.Fatalf("expected SQLITE_INSERT with unquoted arg1=\"Orders\" and arg3=\"main\", got events: %+v", captured)
+	}
+	if !sawUnquotedAuditInsert {
+		t.Fatalf("expected trigger SQLITE_INSERT with unquoted arg1=\"audit_log\" and arg3=\"main\", got events: %+v", captured)
+	}
+	if !sawUnquotedOrdersRead {
+		t.Fatalf("expected view SQLITE_READ with unquoted arg1=\"Orders\", arg2=\"item name\", arg3=\"main\", got events: %+v", captured)
 	}
 }
