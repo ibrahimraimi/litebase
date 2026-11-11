@@ -52,6 +52,18 @@ curl -fsSL https://raw.githubusercontent.com/ibrahimraimi/litebase/main/install.
 | `LITEBASE_INSTALL_DIR` | Target installation directory (overridden by `--dir`). |
 | `LITEBASE_DOWNLOAD_BASE` | **Test-only.** Overrides `https://github.com/ibrahimraimi/litebase/releases/download` for local integration tests (`scripts/test-install.sh`). Non-HTTPS URLs are rejected unless they point to `http://127.0.0.1` or `http://localhost`. |
 
+### Version Resolution & Rate Limits
+
+When neither `--version` nor `LITEBASE_VERSION` is provided, `install.sh` resolves the latest release (including `-beta` prereleases) in the following order:
+
+1. **GitHub Atom Feed (`https://github.com/ibrahimraimi/litebase/releases.atom`):** Primary lookup path. It is not subject to GitHub's 60 requests/hour unauthenticated REST API rate limit, omits draft releases, and includes prereleases. `install.sh` extracts all `/releases/tag/<tag>` links and selects the highest semantic version.
+2. **GitHub REST API (`https://api.github.com/repos/ibrahimraimi/litebase/releases?per_page=10`):** Automatic fallback if the Atom feed cannot be reached or yields no valid tag.
+3. **Explicit override (`--version` / `LITEBASE_VERSION`):** If you are behind a corporate proxy, school/office NAT, or CI runner that receives HTTP `403` / `429` rate-limit responses from GitHub, pass the version explicitly to skip version discovery completely:
+
+   ```sh
+   curl -fsSL https://raw.githubusercontent.com/ibrahimraimi/litebase/main/install.sh | LITEBASE_VERSION=v0.0.3-beta sh
+   ```
+
 ---
 
 ## 3. Supported Platforms
