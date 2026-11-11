@@ -1,6 +1,6 @@
 # 0013: Backup credentials come from the environment and are never stored
 
-- **Status:** Proposed (planned for v0.0.3-beta)
+- **Status:** Accepted
 - **Date:** 2026-11-09
 
 ## Context
@@ -9,8 +9,9 @@ Off-box backups need credentials for S3-compatible storage. The control database
 
 ## Decision
 
-- Remote storage credentials are read from **environment variables** (`LITEBASE_S3_ENDPOINT`, `_REGION`, `_BUCKET`, `_PREFIX`, `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`).
-- They are **never** written to the control database, project files or logs.
+- Remote storage configuration and credentials are read from **environment variables** (`LITEBASE_S3_ENDPOINT`, `LITEBASE_S3_REGION`, `LITEBASE_S3_BUCKET`, `LITEBASE_S3_PREFIX`, `LITEBASE_S3_ACCESS_KEY_ID`, `LITEBASE_S3_SECRET_ACCESS_KEY`, or `LITEBASE_BACKUP_DIR` for a local directory store).
+- Setting `LITEBASE_S3_*` or `LITEBASE_BACKUP_DIR` configures the server's `BlobStore`, **not** an automatic backup schedule on every database. Scheduled backups are explicitly **opt-in per database** via `litebase backup policy set` (or `PUT /v1/databases/{db}/backup-policy`) so scratch and branch databases do not incur unexpected background I/O or bucket egress.
+- Credentials are **never** written to the control database, project files, error responses, or structured logs.
 - Per-database credentials are not supported.
 
 ## Consequences

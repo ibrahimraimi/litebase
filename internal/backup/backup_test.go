@@ -6,6 +6,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -917,4 +918,95 @@ func decodeAWSChunkedBody(raw []byte) []byte {
 		}
 	}
 	return out.Bytes()
+}
+
+func TestS3UploadFailureNeverLogsSecretCredentials(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+
+	seedDatabaseWithPolicyForBackupTest(t, ctx, dataDir, true)
+
+	failingS3 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/fail-bucket" {
+			if _, isLoc := r.URL.Query()["location"]; isLoc {
+				w.Header().Set("Content-Type", "application/xml")
+				_, _ = io.WriteString(w, `<LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/">us-east-1</LocationConstraint>`)
+				return
+			}
+		}
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `<Error><Code>SignatureDoesNotMatch</Code><Message>The request signature we calculated does not match the signature you provided.</Message></Error>`)
+	}))
+	defer failingS3.Close()
+
+	const (
+		sentinelAccessKey = "AKIA_SECRET_SENTINEL_ID_999"
+		sentinelSecretKey = "SECRET_SENTINEL_KEY_VALUE_DO_NOT_LOG_999"
+	)
+
+	t.Setenv(EnvS3Endpoint, failingS3.URL)
+	t.Setenv(EnvS3Region, "us-east-1")
+	t.Setenv(EnvS3Bucket, "fail-bucket")
+	t.Setenv(EnvS3Prefix, "prod")
+	t.Setenv(EnvS3AccessKeyID, sentinelAccessKey)
+	t.Setenv(EnvS3SecretAccessKey, sentinelSecretKey)
+
+	blobStore, err := LoadBlobStoreFromEnv()
+	if err != nil {
+		t.Fatalf("LoadBlobStoreFromEnv: %v", err)
+	}
+
+	store, err := control.OpenStore(ctx, filepath.Join(dataDir, "control.db"))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer store.Close()
+
+	mgr, err := manager.NewManager(manager.Config{DataDir: dataDir, Store: store})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	defer mgr.CloseAll(ctx)
+
+	snapSvc := snapshot.NewService(mgr)
+	bm := NewManager(ManagerConfig{
+		DBManager:     mgr,
+		Snapshots:     snapSvc,
+		BlobStore:     blobStore,
+		RetryBaseWait: time.Millisecond,
+	})
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	sched := NewScheduler(SchedulerConfig{
+		DBManager:     mgr,
+		Snapshots:     snapSvc,
+		BackupManager: bm,
+		Logger:        logger,
+	})
+
+	_, runErr := sched.RunNow(ctx, "main")
+	if runErr == nil {
+		t.Fatal("expected S3 upload failure against failing endpoint")
+	}
+
+	status, err := sched.GetStatus(ctx, "main")
+	if err != nil {
+		t.Fatalf("GetStatus: %v", err)
+	}
+
+	outputsToCheck := map[string]string{
+		"run error":                runErr.Error(),
+		"structured log output":    logBuf.String(),
+		"backup_policy.last_error": status.LastError,
+	}
+	for source, content := range outputsToCheck {
+		if strings.Contains(content, sentinelSecretKey) {
+			t.Fatalf("%s leaked LITEBASE_S3_SECRET_ACCESS_KEY: %s", source, content)
+		}
+		if strings.Contains(content, sentinelAccessKey) {
+			t.Fatalf("%s leaked LITEBASE_S3_ACCESS_KEY_ID: %s", source, content)
+		}
+	}
 }

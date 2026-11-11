@@ -16,6 +16,7 @@ Litebase is in **beta (0.0.x)**. APIs, file formats and CLI commands can still c
 | 0.0.1-beta | It works | Shipped |
 | 0.0.2-beta | Trust | Shipped |
 | 0.0.3-beta | Survive | Shipped |
+| 0.0.4-beta | Control | In progress |
 
 ### 0.0.0: Inception
 
@@ -56,15 +57,31 @@ The goal: if the disk dies or a restore goes wrong, you get your data back.
 
 Release gate: crash tests for snapshot and restore pass, and a full disaster-recovery drill works from an empty data directory.
 
+### 0.0.4-beta: Control
+
+The goal: give a token to one service or tenant without giving it the whole database.
+
+- **Policy-backed tokens** (`allow`/`deny` statements with actions and resource patterns).
+- **Table-level SQL access control** enforced in the SQLite authorizer callback, not by parsing SQL.
+- **`litebase token explain`** and detailed `403` errors so policies are debuggable.
+- **Backward-compatible** with existing `read` / `write` / `admin` tokens.
+- **Litestream sidecar evaluation** and **copy-on-write storage note** (documents only).
+
+Release gate: policy fuzz tests pass, view/trigger/CTE bypass tests pass, and all existing token tests pass unchanged.
+
+## Next: 0.0.5 (tentative)
+
+- **Adopt:** a tiny zero-dependency TypeScript client and a 5-minute quickstart that hides the typed-value wire format.
+- **Litestream sidecar recipe** in `deploy/` if the 0.0.4 evaluation passes.
+
 ## Later (unscheduled, in rough order)
 
-- Point-in-time recovery by integrating Litestream as a sidecar.
-- A TypeScript client and a quickstart that hides the typed-value encoding.
-- Client-side encryption of backups.
-- Cleanup of orphaned files on by default.
+- Client-side encryption of remote backups (age or Tink).
+- Orphan snapshot cleanup enabled by default.
+- Token update / rotation without recreation.
 - API freeze and a stable 1.0, with a documented upgrade path.
 - Teams: organizations, roles and a small web dashboard.
-- Copy-on-write branching for large databases.
+- Copy-on-write branching (per the 0.0.4 storage note).
 
 ## Not planned
 

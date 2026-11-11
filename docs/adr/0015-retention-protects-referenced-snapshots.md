@@ -1,6 +1,6 @@
 # 0015: Retention never deletes a snapshot that is still needed
 
-- **Status:** Proposed (planned for v0.0.3-beta)
+- **Status:** Accepted
 - **Date:** 2026-11-09
 
 ## Context

@@ -1,6 +1,6 @@
 # 0016: Restore verifies before it replaces, and an interrupted restore rolls back
 
-- **Status:** Proposed (planned for v0.0.3-beta)
+- **Status:** Accepted
 - **Date:** 2026-11-09
 
 ## Context
@@ -10,8 +10,9 @@ Restore moves the live database aside and renames a staged copy into place (ADR 
 ## Decision
 
 - **Verify first.** Before replacing anything, check the SHA-256 checksum and run `PRAGMA integrity_check` on the staged file. A mismatch aborts and leaves the live database untouched.
-- **Durable moves.** Every file moved into place is written, `fsync`ed, renamed, and the parent directory is `fsync`ed. This is one shared helper.
-- **Atomic snapshot files.** Snapshots are written to a temporary name, verified, then renamed. Temporary files are cleaned up on startup.
+- **Durable moves.** Every file moved into place is written, `fsync`ed, renamed, and the parent directory is `fsync`ed. This is one shared helper (`engine.AtomicReplace`).
+- **Atomic snapshot files.** Snapshots are written to a temporary `.sqlite.tmp` name, verified, then renamed. Leftover `.sqlite.tmp` files are cleaned up on startup.
+- **Orphan snapshot files log a warning by default.** If a `.sqlite` file exists in `<data-dir>/snapshots/<db>/` with no matching row in `control.db`, startup logs a warning by default rather than deleting it, so manually placed snapshot files are never destroyed unexpectedly. Operators can opt into automatic deletion with `--delete-orphan-snapshots` (`delete_orphan_snapshots = true`).
 - **Startup recovery rolls back, never forward.** On start, for each database path:
   - staging exists and the database exists: delete the staging file;
   - the database is missing and `.pre-restore` exists: restore `.pre-restore` and log a warning;

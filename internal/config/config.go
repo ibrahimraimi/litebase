@@ -10,7 +10,11 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-var Version = "0.0.3-beta"
+var (
+	Version   = "0.0.3-beta"
+	Commit    = "dev"
+	BuildDate = "unknown"
+)
 
 const (
 	ConfigFileName        = "litebase.toml"

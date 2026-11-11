@@ -22,7 +22,7 @@ builds:
     flags:
       - -trimpath
     ldflags:
-      - -s -w -X github.com/ibrahimraimi/litebase/internal/config.Version={{.Version}}
+      - -s -w -X github.com/ibrahimraimi/litebase/internal/config.Version={{.Version}} -X github.com/ibrahimraimi/litebase/internal/config.Commit={{.ShortCommit}} -X github.com/ibrahimraimi/litebase/internal/config.BuildDate={{.Date}}
 
 archives:
   - id: default
@@ -32,6 +32,7 @@ archives:
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
     files:
       - LICENSE
+      - THIRD_PARTY_NOTICES.md
       - README.md
       - CHANGELOG.md
       - docs/*
