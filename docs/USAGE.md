@@ -396,7 +396,7 @@ All error responses return `Content-Type: application/problem+json` with a machi
 
 ```json
 {
-  "type": "https://litebase.dev/problems/forbidden",
+  "type": "https://litebase.tech/problems/forbidden",
   "title": "Forbidden",
   "status": 403,
   "detail": "statement denied by security policy: ATTACH statements are prohibited",

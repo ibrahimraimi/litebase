@@ -47,7 +47,7 @@ func writeProblem(w http.ResponseWriter, status int, code string, detail string)
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.WriteHeader(status)
 	problem := ProblemDetail{
-		Type:   "https://litebase.dev/problems/" + code,
+		Type:   "https://litebase.tech/problems/" + code,
 		Title:  http.StatusText(status),
 		Status: status,
 		Code:   code,
