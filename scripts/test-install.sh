@@ -341,8 +341,8 @@ run_suite_for_shell() {
 		fail "${info_prefix} expected unsupported arch armv7l to exit non-zero"
 	fi
 	case "$out_arch" in
-		*"Unsupported CPU architecture: armv7l"* ) ;;
-		*) fail "${info_prefix} expected unsupported arch message, got: ${out_arch}" ;;
+		*"Unsupported CPU architecture: armv7l"*"docker build -t litebase:latest ."* ) ;;
+		*) fail "${info_prefix} expected unsupported arch message with docker build command, got: ${out_arch}" ;;
 	esac
 	pass "${info_prefix} unsupported architecture rejected with message"
 
@@ -351,18 +351,18 @@ run_suite_for_shell() {
 		fail "${info_prefix} expected musl Linux to exit non-zero"
 	fi
 	case "$out_musl" in
-		*"Detected musl libc"* ) ;;
-		*) fail "${info_prefix} expected musl message, got: ${out_musl}" ;;
+		*"Detected musl libc"*"docker build -t litebase:latest ."* ) ;;
+		*) fail "${info_prefix} expected musl message with docker build command, got: ${out_musl}" ;;
 	esac
-	pass "${info_prefix} musl Linux rejected with Docker/source guidance"
+	pass "${info_prefix} musl Linux rejected with Dockerfile build/source guidance"
 
 	# 11. Windows detection message
 	if out_win=$(LITEBASE_TEST_UNAME_S="MINGW64_NT-10.0" LITEBASE_TEST_UNAME_M="x86_64" "$shell_bin" "$INSTALL_SCRIPT" --version v0.0.3-beta 2>&1); then
 		fail "${info_prefix} expected Windows MINGW64 to exit non-zero"
 	fi
 	case "$out_win" in
-		*"Windows is not supported by install.sh"* ) ;;
-		*) fail "${info_prefix} expected Windows rejection message, got: ${out_win}" ;;
+		*"Windows is not supported by install.sh"*"docker build -t litebase:latest ."* ) ;;
+		*) fail "${info_prefix} expected Windows rejection message with docker build command, got: ${out_win}" ;;
 	esac
 	pass "${info_prefix} Windows rejected without touching System32"
 

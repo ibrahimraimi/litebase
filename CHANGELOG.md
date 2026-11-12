@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `install.sh` now resolves the default release version from GitHub's `releases.atom` feed first (with SemVer comparison and automatic fallback to the REST API), avoiding HTTP `403` unauthenticated REST API rate-limit failures on shared IPs.
+- `Dockerfile` builder image raised from `golang:1.23-bookworm` to `golang:1.26-bookworm`; the old image could not build because `go.mod` requires `go 1.26.0`. CI now fails if the `Dockerfile` Go version is lower than `go.mod`.
+- `install.sh` and the installer guide no longer point to a prebuilt Docker image, which is not published. They now give the `docker build -t litebase:latest .` command instead.
 
 ---
 
