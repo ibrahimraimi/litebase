@@ -68,6 +68,10 @@ func TestAuthorizerCallbackPinnedContract(t *testing.T) {
 		}
 		for rows.Next() {
 		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			t.Fatalf("%s rows iteration: %v", name, err)
+		}
 		if err := rows.Close(); err != nil {
 			t.Fatalf("%s close rows: %v", name, err)
 		}
