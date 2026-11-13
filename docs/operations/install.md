@@ -79,8 +79,8 @@ Prebuilt release archives (`litebase_<version>_<os>_<arch>.tar.gz`) are compiled
 
 ### Unsupported Platforms
 
-- **Alpine Linux / musl libc:** Prebuilt Linux binaries are dynamically linked against glibc. When `install.sh` detects musl (`/etc/alpine-release`, `ldd --version`, or `/lib/ld-musl-*`), it exits non-zero and directs you to the [Docker image](../INSTALLATION.md#option-2-run-with-docker) or [building from source](../INSTALLATION.md#option-1-build-from-source).
-- **Windows (`MINGW`, `MSYS`, `CYGWIN`):** `install.sh` refuses to run on Windows and never writes to `C:\Windows\System32`. Use WSL2, Docker, or download the release archive manually from the [Releases page](https://github.com/ibrahimraimi/litebase/releases).
+- **Alpine Linux / musl libc:** Prebuilt Linux binaries are dynamically linked against glibc. When `install.sh` detects musl (`/etc/alpine-release`, `ldd --version`, or `/lib/ld-musl-*`), it exits non-zero and directs you to build from the repository [`Dockerfile`](../INSTALLATION.md#option-2-run-with-docker) (`docker build -t litebase:latest .`) or [build from source](../INSTALLATION.md#option-1-build-from-source).
+- **Windows (`MINGW`, `MSYS`, `CYGWIN`):** `install.sh` refuses to run on Windows and never writes to `C:\Windows\System32`. Run `install.sh` inside WSL2, or build from the repository `Dockerfile` (`docker build -t litebase:latest .`). No prebuilt Windows archive or published container image exists yet.
 - **Other architectures (`armv7l`, `riscv64`, `s390x`, etc.):** Build from source with `CGO_ENABLED=1 go build -trimpath -o bin/litebase ./cmd/litebase`.
 
 ---

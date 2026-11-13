@@ -32,6 +32,29 @@ jobs:
             exit 1
           fi
 
+      - name: Verify Dockerfile Go version is not lower than go.mod
+        run: |
+          GOMOD_VER=$(awk '/^go [0-9]+\.[0-9]+/ {print $2; exit}' go.mod)
+          DOCKER_VER=$(awk -F'[: -]+' '/^FROM golang:[0-9]+\.[0-9]+/ {print $3; exit}' Dockerfile)
+          if [ -z "$GOMOD_VER" ] || [ -z "$DOCKER_VER" ]; then
+            echo "Failed to parse Go version from go.mod ($GOMOD_VER) or Dockerfile ($DOCKER_VER)" >&2
+            exit 1
+          fi
+          awk -v gomod="$GOMOD_VER" -v docker="$DOCKER_VER" 'BEGIN {
+            split(gomod, g, ".")
+            split(docker, d, ".")
+            g_maj = g[1] + 0; g_min = g[2] + 0; g_pat = (g[3] != "" ? g[3] + 0 : 0)
+            d_maj = d[1] + 0; d_min = d[2] + 0; d_pat = (d[3] != "" ? d[3] + 0 : 0)
+            # A floating tag such as golang:1.26 resolves to the newest 1.26.x, so it satisfies any go 1.26.N directive.
+            if (d[3] == "" && d_maj == g_maj && d_min == g_min) {
+              exit 0
+            }
+            if (d_maj < g_maj || (d_maj == g_maj && d_min < g_min) || (d_maj == g_maj && d_min == g_min && d_pat < g_pat)) {
+              printf "Dockerfile Go version (%s) is lower than go.mod (%s)\n", docker, gomod > "/dev/stderr"
+              exit 1
+            }
+          }'
+
       - name: Run go vet
         run: make vet
 

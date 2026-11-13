@@ -82,6 +82,7 @@ Release gate: policy fuzz tests pass, view/trigger/CTE bypass tests pass, and al
 - API freeze and a stable 1.0, with a documented upgrade path.
 - Teams: organizations, roles and a small web dashboard.
 - Copy-on-write branching (per the 0.0.4 storage note).
+- Publish a prebuilt container image (today you build it yourself with `docker build -t litebase:latest .`).
 
 ## Not planned
 

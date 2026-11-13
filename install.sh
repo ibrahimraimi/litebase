@@ -67,7 +67,7 @@ EOF
 
 print_supported_platforms() {
 	err "Supported prebuilt platforms are: linux/amd64 (glibc), linux/arm64 (glibc), darwin/amd64, darwin/arm64."
-	err "For other platforms, run the Docker image or build from source:"
+	err "For other platforms, build from the repository Dockerfile (docker build -t litebase:latest .) or build from source:"
 	err "  https://github.com/${GITHUB_REPO}/blob/main/docs/INSTALLATION.md"
 }
 
@@ -99,13 +99,14 @@ detect_platform() {
 	case "$raw_os" in
 		MINGW* | MSYS* | CYGWIN* | Windows_NT)
 			err "Windows is not supported by install.sh."
-			err "Download the release archive from https://github.com/${GITHUB_REPO}/releases or run Litebase under WSL2 / Docker."
+			err "Run install.sh inside WSL2, or build from the repository Dockerfile (docker build -t litebase:latest .):"
+			err "  https://github.com/${GITHUB_REPO}/blob/main/docs/INSTALLATION.md"
 			exit 1
 			;;
 		Linux)
 			if is_musl_linux; then
 				err "Detected musl libc (e.g. Alpine Linux). Prebuilt Litebase Linux binaries require glibc (CGO SQLite)."
-				err "Use the official Docker image or build from source with CGO_ENABLED=1:"
+				err "Build from the repository Dockerfile (docker build -t litebase:latest .) or build from source with CGO_ENABLED=1:"
 				err "  https://github.com/${GITHUB_REPO}/blob/main/docs/INSTALLATION.md"
 				exit 1
 			fi
@@ -286,7 +287,7 @@ parse_release_tags_from_atom() {
 }
 
 parse_release_tags_from_json() {
-	tr '{},' '\n\n\n' | awk '
+	tr '{},' '\n' | awk '
 		/"tag_name"[[:space:]]*:/ {
 			line = $0
 			sub(/^.*"tag_name"[[:space:]]*:[[:space:]]*"/, "", line)
