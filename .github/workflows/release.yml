@@ -46,7 +46,7 @@ jobs:
 
       - name: Run GoReleaser snapshot build (workflow_dispatch dry-run)
         if: github.event_name == 'workflow_dispatch'
-        uses: goreleaser/goreleaser-action@v6
+        uses: goreleaser/goreleaser-action@v7
         with:
           version: "~> v2"
           args: build --snapshot --clean --single-target
